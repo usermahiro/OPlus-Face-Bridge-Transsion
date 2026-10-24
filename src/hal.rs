@@ -115,7 +115,7 @@ pub struct face_device_t {
     pub get_authenticator_id: Option<unsafe extern "C" fn(dev: *mut face_device_t, auth_id: *mut u64) -> libc::c_int>,
     pub cancel: Option<unsafe extern "C" fn(dev: *mut face_device_t) -> libc::c_int>,
     pub enumerate: Option<unsafe extern "C" fn(dev: *mut face_device_t) -> libc::c_int>,
-    pub remove: Option<unsafe extern "C" fn(dev: *mut face_device_t, face_id: u32) -> libc::c_int>,
+    pub remove: Option<unsafe extern "C" fn(dev: *mut face_device_t, ids: *mut u32, count: u32) -> libc::c_int>,
     pub set_active_group: Option<unsafe extern "C" fn(dev: *mut face_device_t, user_id: u32, store_path: *const libc::c_char) -> libc::c_int>,
     pub authenticate: Option<unsafe extern "C" fn(dev: *mut face_device_t, operation_id: u64) -> libc::c_int>,
     pub reserved_e8: u64,
@@ -646,7 +646,8 @@ impl FaceHal {
     pub fn remove(&self, face_id: u32) -> i32 {
         if let Some(dev) = unsafe { self.device.as_ref() } {
             if let Some(remove_fn) = dev.remove {
-                return unsafe { remove_fn(self.device, face_id) };
+                let mut id = face_id;
+                return unsafe { remove_fn(self.device, &mut id, 1) };
             }
         }
         0
