@@ -114,12 +114,12 @@ pub struct face_device_t {
     pub get_feature: Option<unsafe extern "C" fn(dev: *mut face_device_t, feature: i32, face_id: i32, result: *mut bool) -> libc::c_int>,
     pub get_authenticator_id: Option<unsafe extern "C" fn(dev: *mut face_device_t, auth_id: *mut u64) -> libc::c_int>,
     pub cancel: Option<unsafe extern "C" fn(dev: *mut face_device_t) -> libc::c_int>,
-    pub enumerate: Option<unsafe extern "C" fn(dev: *mut face_device_t) -> libc::c_int>,
-    pub remove: Option<unsafe extern "C" fn(dev: *mut face_device_t, ids: *mut u32, count: u32) -> libc::c_int>,
-    pub set_active_group: Option<unsafe extern "C" fn(dev: *mut face_device_t, user_id: u32, store_path: *const libc::c_char) -> libc::c_int>,
-    pub authenticate: Option<unsafe extern "C" fn(dev: *mut face_device_t, operation_id: u64) -> libc::c_int>,
-    pub reserved_e8: u64,
-    pub reset_lockout: Option<unsafe extern "C" fn(dev: *mut face_device_t, hat: *const hw_auth_token_t) -> libc::c_int>,
+    pub update_enroll_fps: Option<unsafe extern "C" fn(dev: *mut face_device_t) -> libc::c_int>, // 0xc8
+    pub enumerate: Option<unsafe extern "C" fn(dev: *mut face_device_t) -> libc::c_int>,         // 0xd0
+    pub remove: Option<unsafe extern "C" fn(dev: *mut face_device_t, ids: *mut u32, count: u32) -> libc::c_int>, // 0xd8
+    pub set_active_group: Option<unsafe extern "C" fn(dev: *mut face_device_t, user_id: u32, store_path: *const libc::c_char) -> libc::c_int>, // 0xe0
+    pub authenticate: Option<unsafe extern "C" fn(dev: *mut face_device_t, operation_id: u64) -> libc::c_int>, // 0xe8
+    pub reset_lockout: Option<unsafe extern "C" fn(dev: *mut face_device_t, hat: *const hw_auth_token_t) -> libc::c_int>, // 0xf0
 }
 
 extern "C" {
