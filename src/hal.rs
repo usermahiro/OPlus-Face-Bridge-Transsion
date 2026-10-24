@@ -134,11 +134,87 @@ extern "C" {
     fn sensetime_set_orientation(orientation: libc::c_int) -> libc::c_int;
 }
 
+
+/// Per-build offsets of the vendor face.default.so, selected by the offset of `HMI`
+/// relative to the real load base. Unknown builds get no patches (no crash).
+pub struct HalOffsets {
+    hmi: usize,
+    got_license: usize,
+    got_open_camera: usize,
+    camera_id_strs: &'static [usize],
+    challenge: Option<usize>,
+    /// (startCameraCapture, closeCamera, camera ctx)
+    feeder: Option<(usize, usize, usize)>,
+}
+
+static OFFSETS_V1: HalOffsets = HalOffsets {
+    hmi: 0xfaa0,
+    got_license: 0xe770,
+    got_open_camera: 0xe9d8,
+    camera_id_strs: &[0x4fb5, 0x5190],
+    challenge: Some(0x9ae8),
+    feeder: Some((0xb6cc, 0x87b4, 0x10f38)),
+};
+
+// BuildId 99418dcb4982cf6d1d4a326ea618a5d4 (PKB110). GOT slots come from .rela.plt.
+// challenge/feeder offsets still need to be found for this build.
+static OFFSETS_V2: HalOffsets = HalOffsets {
+    hmi: 0x18040,
+    got_license: 0x145a0,
+    got_open_camera: 0x14918,
+    camera_id_strs: &[],
+    challenge: None,
+    feeder: None,
+};
+
+fn offsets_for(hmi_off: usize) -> Option<&'static HalOffsets> {
+    [&OFFSETS_V1, &OFFSETS_V2].into_iter().find(|o| o.hmi == hmi_off)
+}
+
+/// Original protection of the mapping containing `addr`, from /proc/self/maps.
+fn map_prot(addr: usize) -> Option<i32> {
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    for line in maps.lines() {
+        let mut it = line.split_whitespace();
+        let range = it.next()?;
+        let perms = it.next()?;
+        let (a, b) = range.split_once('-')?;
+        let (a, b) = (usize::from_str_radix(a, 16).ok()?, usize::from_str_radix(b, 16).ok()?);
+        if addr >= a && addr < b {
+            let p = perms.as_bytes();
+            let mut prot = 0;
+            if p[0] == b'r' { prot |= libc::PROT_READ; }
+            if p[1] == b'w' { prot |= libc::PROT_WRITE; }
+            if p[2] == b'x' { prot |= libc::PROT_EXEC; }
+            return Some(prot);
+        }
+    }
+    None
+}
+
+/// Make [addr, addr+len) writable, run `f`, then restore the ORIGINAL protection.
+unsafe fn with_writable<F: FnOnce()>(addr: usize, len: usize, f: F) -> bool {
+    let ps = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+    let start = addr & !(ps - 1);
+    let end = (addr + len + ps - 1) & !(ps - 1);
+    let orig = match map_prot(addr) {
+        Some(p) => p,
+        None => return false,
+    };
+    if libc::mprotect(start as *mut _, end - start, orig | libc::PROT_READ | libc::PROT_WRITE) != 0 {
+        return false;
+    }
+    f();
+    libc::mprotect(start as *mut _, end - start, orig);
+    true
+}
+
 pub struct FaceHal {
     device: *mut face_device_t,
     current_callback: Arc<Mutex<Option<Strong<dyn ISessionCallback>>>>,
     is_active: AtomicBool,
     lib_base: usize,
+    offsets: &'static HalOffsets,
     camera_active: AtomicBool,
     surface_bridge_ctx: Mutex<Option<usize>>,
     pub enrolling_face_id: std::sync::atomic::AtomicI32,
@@ -363,17 +439,21 @@ impl FaceHal {
 
         let open_fn = methods.open.ok_or_else(|| anyhow::anyhow!("open function pointer is null"))?;
 
-        let lib_base = (hmi_ptr as usize).saturating_sub(0xfaa0);
-        tracing::info!("Calculated face HAL lib_base at 0x{:x} (from HMI 0x{:x})", lib_base, hmi_ptr as usize);
+        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+        if unsafe { libc::dladdr(hmi_ptr as *const libc::c_void, &mut info) } == 0 || info.dli_fbase.is_null() {
+            anyhow::bail!("dladdr failed for HMI, cannot determine face HAL base");
+        }
+        let lib_base = info.dli_fbase as usize;
+        let hmi_off = (hmi_ptr as usize) - lib_base;
+        tracing::info!("face HAL lib_base=0x{:x}, HMI offset=0x{:x}", lib_base, hmi_off);
+        let offsets = match offsets_for(hmi_off) {
+            Some(o) => o,
+            None => anyhow::bail!("unknown face.default.so build (HMI offset 0x{:x}); refusing to patch", hmi_off),
+        };
 
-        // Bypass SenseTime proprietary license check before calling face_open
-        Self::patch_sensetime_license(handle, loaded_path, lib_base);
-
-        // Fix Transsion "1-faceid" / "2-faceid" camera ID to standard "1"
-        Self::patch_camera_id(handle, lib_base);
-
-        // Bypass Transsion HAL challenge verification to prevent error 1004
-        Self::patch_challenge_check(lib_base);
+        Self::patch_sensetime_license(handle, loaded_path, lib_base, offsets);
+        Self::patch_camera_id(handle, lib_base, offsets);
+        Self::patch_challenge_check(lib_base, offsets);
 
         let mut dev_ptr: *mut hw_device_t = std::ptr::null_mut();
         let id_face = CString::new("face").unwrap();
@@ -392,6 +472,7 @@ impl FaceHal {
             current_callback: Arc::new(Mutex::new(None)),
             is_active: AtomicBool::new(false),
             lib_base,
+            offsets,
             camera_active: AtomicBool::new(false),
             surface_bridge_ctx: Mutex::new(None),
             enrolling_face_id: std::sync::atomic::AtomicI32::new(1),
@@ -554,12 +635,11 @@ impl FaceHal {
         // Enforce SenseTime orientation 8
         let _ = unsafe { sensetime_set_orientation(8) };
 
-        tracing::info!(
-            "Starting front camera feeder for face enrollment (lib_base=0x{:x}, fn=0x{:x}, ctx=0x{:x})...",
-            self.lib_base,
-            self.lib_base + 0xb6cc,
-            self.lib_base + 0x10f38
-        );
+        let Some((start_off, _close_off, ctx_off)) = self.offsets.feeder else {
+            tracing::error!("Camera feeder offsets unknown for this face.default.so build");
+            self.camera_active.store(false, Ordering::SeqCst);
+            return;
+        };
         if self.lib_base == 0 {
             tracing::error!("Cannot start camera: lib_base is 0");
             return;
@@ -569,7 +649,7 @@ impl FaceHal {
         let _ = std::fs::remove_file("/data/vendor_de/0/facedata/faceIdEnroll.tmp");
         let _ = std::fs::remove_file("/data/vendor_de/0/facedata/faceIdEnroll.yuv");
 
-        let camera_ctx = (self.lib_base + 0x10f38) as *mut libc::c_void;
+        let camera_ctx = (self.lib_base + ctx_off) as *mut libc::c_void;
         let start_camera_fn: Option<
             unsafe extern "C" fn(
                 *mut libc::c_void,
@@ -577,7 +657,7 @@ impl FaceHal {
                 unsafe extern "C" fn(*const u8, i32),
                 unsafe extern "C" fn(),
             ) -> i32,
-        > = unsafe { std::mem::transmute(self.lib_base + 0xb6cc) };
+        > = unsafe { std::mem::transmute(self.lib_base + start_off) };
 
         if let Some(start_fn) = start_camera_fn {
             let ret = unsafe {
@@ -604,9 +684,10 @@ impl FaceHal {
         if self.lib_base == 0 {
             return;
         }
-        let camera_ctx = (self.lib_base + 0x10f38) as *mut libc::c_void;
+        let Some((_s, close_off, ctx_off)) = self.offsets.feeder else { return };
+        let camera_ctx = (self.lib_base + ctx_off) as *mut libc::c_void;
         let close_camera_fn: Option<unsafe extern "C" fn(*mut libc::c_void, i32) -> i32> = unsafe {
-            std::mem::transmute(self.lib_base + 0x87b4)
+            std::mem::transmute(self.lib_base + close_off)
         };
         if let Some(close_fn) = close_camera_fn {
             let ret = unsafe { close_fn(camera_ctx, 0) };
@@ -775,50 +856,24 @@ impl FaceHal {
         }
     }
 
-    fn patch_sensetime_license(handle: *mut libc::c_void, _loaded_path: &str, lib_base: usize) {
+    fn patch_sensetime_license(handle: *mut libc::c_void, _loaded_path: &str, lib_base: usize, o: &HalOffsets) {
         let sym_name = CString::new("st_face_init_license").unwrap();
         let original_fn_ptr = unsafe { libc::dlsym(handle, sym_name.as_ptr()) as usize };
         tracing::info!("Original st_face_init_license symbol address: 0x{:x}", original_fn_ptr);
 
-        let base = lib_base;
-        tracing::info!("Using face HAL base at 0x{:x}", base);
-
-        // Primary target: known GOT offset 0xe770
-        let got_entry = (base + 0xe770) as *mut usize;
-        let page_size = 4096;
-        let page_addr = (got_entry as usize) & !(page_size - 1);
-
-        unsafe {
-            let prot_res = libc::mprotect(
-                page_addr as *mut libc::c_void,
-                page_size * 2,
-                libc::PROT_READ | libc::PROT_WRITE,
-            );
-            if prot_res == 0 {
-                *got_entry = dummy_st_face_init_license as *const () as usize;
-                tracing::info!(
-                    "Patched face HAL GOT[0xe770] at 0x{:x} -> 0x{:x}",
-                    got_entry as usize,
-                    *got_entry
-                );
-            } else {
-                tracing::warn!("mprotect failed for GOT page: {prot_res}");
-            }
-
-            // Dynamic scan over .got / .got.plt range (base + 0xe000 .. base + 0xf000)
-            if original_fn_ptr != 0 {
-                let start = (base + 0xe000) as *mut usize;
-                let count = (0x1000) / std::mem::size_of::<usize>();
-                for i in 0..count {
-                    let slot = start.add(i);
-                    if *slot == original_fn_ptr {
-                        *slot = dummy_st_face_init_license as *const () as usize;
-                        tracing::info!("Dynamically matched and patched GOT slot at 0x{:x}", slot as usize);
-                    }
-                }
-            }
+        let slot = (lib_base + o.got_license) as *mut usize;
+        let ok = unsafe {
+            with_writable(slot as usize, 8, || {
+                *slot = dummy_st_face_init_license as *const () as usize;
+            })
+        };
+        if ok {
+            tracing::info!("Patched license GOT at 0x{:x}", slot as usize);
+        } else {
+            tracing::warn!("Failed to patch license GOT at 0x{:x}", slot as usize);
         }
 
+        // Also set libstfaceunlockppl.so internal license flag (unchanged logic)
         let maps = match std::fs::read_to_string("/proc/self/maps") {
             Ok(m) => m,
             Err(e) => {
@@ -826,8 +881,6 @@ impl FaceHal {
                 return;
             }
         };
-
-        // Also set libstfaceunlockppl.so internal license flag
         for line in maps.lines() {
             if line.contains("libstfaceunlockppl.so") {
                 if let Some(range) = line.split_whitespace().next() {
@@ -835,43 +888,21 @@ impl FaceHal {
                     if let Ok(base) = usize::from_str_radix(parts[0], 16) {
                         tracing::info!("Found libstfaceunlockppl.so base at 0x{:x}", base);
                         let flag_ptr = (base + 0x33914e8) as *mut u8;
-                        let page_size = 4096;
-                        let page_addr = (flag_ptr as usize) & !(page_size - 1);
                         unsafe {
-                            let prot_res = libc::mprotect(
-                                page_addr as *mut libc::c_void,
-                                page_size,
-                                libc::PROT_READ | libc::PROT_WRITE,
-                            );
-                            if prot_res == 0 {
-                                *flag_ptr = 1;
-                                tracing::info!("Set libstfaceunlockppl is_licensed flag to 1 at 0x{:x}", flag_ptr as usize);
+                            if with_writable(flag_ptr as usize, 1, || *flag_ptr = 1) {
+                                tracing::info!("Set libstfaceunlockppl is_licensed flag at 0x{:x}", flag_ptr as usize);
                             }
-
-                            // Also patch SDK protector license check function at 0x30b334
                             let lic_fn_ptr = (base + 0x30b334) as *mut u32;
-                            let lic_page = (lic_fn_ptr as usize) & !(page_size - 1);
-                            let lic_prot = libc::mprotect(
-                                lic_page as *mut libc::c_void,
-                                page_size,
-                                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-                            );
-                            if lic_prot == 0 {
-                                // mov w0, #0 (0x52800000)
-                                // ret        (0xd65f03c0)
-                                *lic_fn_ptr = 0x52800000;
-                                *lic_fn_ptr.add(1) = 0xd65f03c0;
-                                libc::mprotect(
-                                    lic_page as *mut libc::c_void,
-                                    page_size,
-                                    libc::PROT_READ | libc::PROT_EXEC,
-                                );
-                                tracing::info!(
-                                    "Patched libstfaceunlockppl protector at 0x{:x} -> mov w0, #0; ret",
-                                    lic_fn_ptr as usize
-                                );
+                            let ps = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+                            let lic_page = (lic_fn_ptr as usize) & !(ps - 1);
+                            let orig = map_prot(lic_fn_ptr as usize).unwrap_or(libc::PROT_READ | libc::PROT_EXEC);
+                            if libc::mprotect(lic_page as *mut _, ps, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) == 0 {
+                                *lic_fn_ptr = 0x52800000; // mov w0, #0
+                                *lic_fn_ptr.add(1) = 0xd65f03c0; // ret
+                                libc::mprotect(lic_page as *mut _, ps, orig);
+                                tracing::info!("Patched libstfaceunlockppl protector at 0x{:x}", lic_fn_ptr as usize);
                             } else {
-                                tracing::warn!("mprotect failed for protector page: {lic_prot}");
+                                tracing::warn!("mprotect failed for protector page");
                             }
                         }
                         break;
@@ -881,35 +912,24 @@ impl FaceHal {
         }
     }
 
-    fn patch_camera_id(handle: *mut libc::c_void, lib_base: usize) {
-        // Transsion face.default.so hardcodes "1-faceid" and "2-faceid" camera IDs; rewrite to "1"
-        let targets = [
-            0x4fb5, // "1-faceid\0"
-            0x5190, // "2-faceid\0"
-        ];
-        let page_size = 4096;
-
-        for offset in targets {
+    fn patch_camera_id(handle: *mut libc::c_void, lib_base: usize, o: &HalOffsets) {
+        // Transsion HAL hardcodes "1-faceid"/"2-faceid"; rewrite to "1" (only where this build has them)
+        for &offset in o.camera_id_strs {
             let addr = (lib_base + offset) as *mut u8;
-            let page_addr = (addr as usize) & !(page_size - 1);
-            unsafe {
-                let prot_res = libc::mprotect(
-                    page_addr as *mut libc::c_void,
-                    page_size,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                );
-                if prot_res == 0 {
+            let cur = unsafe { std::slice::from_raw_parts(addr, 8) };
+            if cur != b"1-faceid" && cur != b"2-faceid" {
+                tracing::warn!("camera id string not found at offset 0x{:x}, skipping", offset);
+                continue;
+            }
+            let ok = unsafe {
+                with_writable(addr as usize, 9, || {
                     std::ptr::write_bytes(addr, 0, 9);
                     *addr = b'1';
-                    libc::mprotect(page_addr as *mut libc::c_void, page_size, libc::PROT_READ);
-                    tracing::info!("Patched camera ID string at 0x{:x} (offset 0x{:x}) to '1'", addr as usize, offset);
-                } else {
-                    tracing::warn!("Failed to mprotect rodata page 0x{:x} for camera ID patch: {}", page_addr, prot_res);
-                }
-            }
+                })
+            };
+            tracing::info!("Patched camera ID string at offset 0x{:x}: {}", offset, ok);
         }
 
-        // Intercept ACameraManager_openCamera GOT slot
         let sym_name = CString::new("ACameraManager_openCamera").unwrap();
         let real_fn_ptr = unsafe { libc::dlsym(handle, sym_name.as_ptr()) as usize };
         if real_fn_ptr != 0 {
@@ -917,59 +937,47 @@ impl FaceHal {
             tracing::info!("Resolved real ACameraManager_openCamera: 0x{:x}", real_fn_ptr);
         }
 
-        let got_entry = (lib_base + 0xe9d8) as *mut usize;
-        let got_page = (got_entry as usize) & !(page_size - 1);
-        unsafe {
-            if libc::mprotect(got_page as *mut libc::c_void, page_size, libc::PROT_READ | libc::PROT_WRITE) == 0 {
+        let got_entry = (lib_base + o.got_open_camera) as *mut usize;
+        let ok = unsafe {
+            with_writable(got_entry as usize, 8, || {
                 let current_val = *got_entry;
                 if REAL_OPEN_CAMERA.load(Ordering::SeqCst) == 0 && current_val != 0 {
                     REAL_OPEN_CAMERA.store(current_val, Ordering::SeqCst);
                 }
                 *got_entry = hooked_open_camera as *const () as usize;
-                tracing::info!(
-                    "Hooked ACameraManager_openCamera GOT[0xe9d8] at 0x{:x} -> 0x{:x} (real=0x{:x})",
-                    got_entry as usize,
-                    hooked_open_camera as *const () as usize,
-                    REAL_OPEN_CAMERA.load(Ordering::SeqCst)
-                );
-            } else {
-                tracing::warn!("Failed to mprotect GOT page for ACameraManager_openCamera");
-            }
+            })
+        };
+        if ok {
+            tracing::info!("Hooked ACameraManager_openCamera GOT at 0x{:x}", got_entry as usize);
+        } else {
+            tracing::warn!("Failed to hook ACameraManager_openCamera GOT");
         }
     }
 
-    fn patch_challenge_check(lib_base: usize) {
-        let offset = 0x9ae8;
+    fn patch_challenge_check(lib_base: usize, o: &HalOffsets) {
+        let Some(offset) = o.challenge else {
+            tracing::warn!("No challenge-check offset for this build; skipping patch");
+            return;
+        };
         let addr = (lib_base + offset) as *mut u32;
-        let page_size = 4096;
-        let page_addr = (addr as usize) & !(page_size - 1);
+        let ps = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_addr = (addr as usize) & !(ps - 1);
+        let orig = map_prot(addr as usize).unwrap_or(libc::PROT_READ | libc::PROT_EXEC);
         unsafe {
-            let prot_res = libc::mprotect(
-                page_addr as *mut libc::c_void,
-                page_size,
-                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-            );
-            if prot_res == 0 {
-                let current_inst = *addr;
-                if current_inst == 0x54000621 {
-                    // NOP out the b.ne 0x9bac instruction (0xd503201f)
-                    *addr = 0xd503201f;
-                    tracing::info!(
-                        "Patched face_enroll challenge check at 0x{:x} (0x54000621 -> NOP 0xd503201f)",
-                        addr as usize
-                    );
-                } else if current_inst == 0xd503201f {
-                    tracing::info!("face_enroll challenge check already NOPed at 0x{:x}", addr as usize);
-                } else {
-                    tracing::warn!(
-                        "Unexpected instruction at 0x{:x}: 0x{:08x} (expected 0x54000621)",
-                        addr as usize, current_inst
-                    );
-                }
-                libc::mprotect(page_addr as *mut libc::c_void, page_size, libc::PROT_READ | libc::PROT_EXEC);
-            } else {
-                tracing::warn!("Failed to mprotect page for challenge check patch: {prot_res}");
+            if libc::mprotect(page_addr as *mut _, ps, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) != 0 {
+                tracing::warn!("Failed to mprotect page for challenge check patch");
+                return;
             }
+            let cur = *addr;
+            if cur == 0x54000621 {
+                *addr = 0xd503201f;
+                tracing::info!("Patched challenge check at 0x{:x}", addr as usize);
+            } else if cur == 0xd503201f {
+                tracing::info!("challenge check already NOPed");
+            } else {
+                tracing::warn!("Unexpected instruction 0x{:08x} at challenge offset, not patching", cur);
+            }
+            libc::mprotect(page_addr as *mut _, ps, orig);
         }
     }
 }
