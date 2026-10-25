@@ -180,9 +180,10 @@ log_info "Using Cargo: $CARGO_BIN"
 cd "$SCRIPT_DIR"
 
 # Compile via Cargo
+TARGET_BASE="${CARGO_TARGET_DIR:-${SCRIPT_DIR}/target}"
 if [ "$PROFILE" = "release" ]; then
     "$CARGO_BIN" build --target aarch64-linux-android --release
-    BIN="target/aarch64-linux-android/release/android-hardware-biometrics-face-service-transsion"
+    BIN="${TARGET_BASE}/aarch64-linux-android/release/android-hardware-biometrics-face-service-transsion"
     if [ -x "$STRIP" ]; then
         log_info "Stripping release binary..."
         "$STRIP" "$BIN"
@@ -192,7 +193,7 @@ if [ "$PROFILE" = "release" ]; then
     fi
 else
     "$CARGO_BIN" build --target aarch64-linux-android
-    BIN="target/aarch64-linux-android/debug/android-hardware-biometrics-face-service-transsion"
+    BIN="${TARGET_BASE}/aarch64-linux-android/debug/android-hardware-biometrics-face-service-transsion"
 fi
 
 # Prepare output layout

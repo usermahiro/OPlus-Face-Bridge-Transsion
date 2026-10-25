@@ -69,11 +69,56 @@ impl SessionService {
     }
 }
 
+pub const MEGFACE_DATA_DIR: &str = "/data/system/face_unlock_data";
+pub const MEGFACE_FEATURE_FILE: &str = "/data/system/face_unlock_data/feature";
+pub const VENDOR_FACEDATA_DIR: &str = "/data/vendor_de/0/facedata";
+pub const VENDOR_TEMPLATE_FILE: &str = "/data/vendor_de/0/facedata/template_file.data";
+
+pub fn update_face_enrolled_prop(is_enrolled: bool) {
+    let val = if is_enrolled { b"1\0" } else { b"0\0" };
+    #[cfg(target_os = "android")]
+    unsafe {
+        extern "C" {
+            fn __system_property_set(name: *const libc::c_char, value: *const libc::c_char) -> libc::c_int;
+        }
+        let ret = __system_property_set(
+            b"persist.sys.oplus.isFaceEnrolled\0".as_ptr() as *const libc::c_char,
+            val.as_ptr() as *const libc::c_char,
+        );
+        tracing::info!(
+            "__system_property_set(persist.sys.oplus.isFaceEnrolled, {}) returned {}",
+            if is_enrolled { "1" } else { "0" },
+            ret
+        );
+    }
+}
+
+pub fn has_enrolled_faces() -> bool {
+    if let Ok(meta) = std::fs::metadata(MEGFACE_FEATURE_FILE) {
+        if meta.len() > 0 {
+            return true;
+        }
+    }
+    if let Ok(meta) = std::fs::metadata(VENDOR_TEMPLATE_FILE) {
+        if meta.len() > 0 {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn get_enrolled_face_ids() -> Vec<i32> {
-    let template_path = "/data/vendor_de/0/facedata/template_file.data";
+    let template_path = VENDOR_TEMPLATE_FILE;
     let data = match std::fs::read(template_path) {
         Ok(d) if !d.is_empty() => d,
-        _ => return Vec::new(),
+        _ => {
+            if let Ok(meta) = std::fs::metadata(MEGFACE_FEATURE_FILE) {
+                if meta.len() > 0 {
+                    return vec![1];
+                }
+            }
+            return Vec::new();
+        }
     };
 
     let mut ids = Vec::with_capacity(5);
@@ -187,6 +232,13 @@ pub fn get_enrolled_face_ids() -> Vec<i32> {
     }
     ids.sort_unstable();
     ids.dedup();
+    if ids.is_empty() {
+        if let Ok(meta) = std::fs::metadata(MEGFACE_FEATURE_FILE) {
+            if meta.len() > 0 {
+                return vec![1];
+            }
+        }
+    }
     ids
 }
 
@@ -288,8 +340,8 @@ impl ISession for SessionService {
 
     fn r#removeEnrollments(&self, enrollment_ids: &[i32]) -> rsbinder::BinderResult<()> {
         tracing::info!("ISession::removeEnrollments called with ids {:?}", enrollment_ids);
-        let template_dir = "/data/vendor_de/0/facedata";
-        let template_path = "/data/vendor_de/0/facedata/template_file.data";
+        let template_dir = VENDOR_FACEDATA_DIR;
+        let template_path = VENDOR_TEMPLATE_FILE;
 
         let current_ids = get_enrolled_face_ids();
         tracing::info!("Current enrolled IDs before removal: {:?}", current_ids);
@@ -310,10 +362,30 @@ impl ISession for SessionService {
             let _ = std::fs::remove_file(format!("{}.bak", template_path));
             let _ = std::fs::remove_file(format!("{}/feature_ocular.txt", template_dir));
             let _ = std::fs::remove_file(format!("{}/faceIdEnroll.yuv", template_dir));
+
+            // OPlusFace Megvii cleanup: delete feature and restore images
+            let _ = std::fs::remove_file(MEGFACE_FEATURE_FILE);
+            if let Ok(entries) = std::fs::read_dir(MEGFACE_DATA_DIR) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if name.to_string_lossy().starts_with("restore_") {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+            update_face_enrolled_prop(false);
         } else {
             for &id in enrollment_ids {
                 if id > 0 {
                     let _ = self.hal.remove(id as u32);
+                    // Megvii per-id restore image cleanup (id 0 is "delete all" in OPlusFace)
+                    let restore_file = format!("{}/restore_{}", MEGFACE_DATA_DIR, id);
+                    let _ = std::fs::remove_file(restore_file);
+                    // If no faces remain, clear the enrollment flag
+                    if get_enrolled_face_ids().is_empty() {
+                        let _ = std::fs::remove_file(MEGFACE_FEATURE_FILE);
+                        update_face_enrolled_prop(false);
+                    }
                 }
             }
         }
@@ -348,14 +420,20 @@ impl ISession for SessionService {
 
     fn r#getAuthenticatorId(&self) -> rsbinder::BinderResult<()> {
         tracing::info!("ISession::getAuthenticatorId called");
-        let auth_id = self.hal.get_authenticator_id();
+        let mut auth_id = self.hal.get_authenticator_id();
+        if auth_id == 0 {
+            auth_id = 123456789;
+        }
         let _ = self.cb.onAuthenticatorIdRetrieved(auth_id as i64);
         Ok(())
     }
 
     fn r#invalidateAuthenticatorId(&self) -> rsbinder::BinderResult<()> {
         tracing::info!("ISession::invalidateAuthenticatorId called");
-        let auth_id = self.hal.get_authenticator_id();
+        let mut auth_id = self.hal.get_authenticator_id();
+        if auth_id == 0 {
+            auth_id = 123456789;
+        }
         let _ = self.cb.onAuthenticatorIdInvalidated(auth_id as i64);
         Ok(())
     }

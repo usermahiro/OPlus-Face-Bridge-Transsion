@@ -816,6 +816,10 @@ impl FaceHal {
                     self.is_active.store(false, Ordering::Release);
                     self.stop_enroll_camera();
 
+                    let _ = std::fs::create_dir_all(crate::service::MEGFACE_DATA_DIR);
+                    let _ = std::fs::write(crate::service::MEGFACE_FEATURE_FILE, b"MEGFACE_ENROLLED_FEATURE\n");
+                    crate::service::update_face_enrolled_prop(true);
+
                     let updated = crate::service::get_enrolled_face_ids();
                     let before = self.existing_face_ids.lock().clone();
                     if let Some(&new_id) = updated.iter().find(|id| !before.contains(id)) {

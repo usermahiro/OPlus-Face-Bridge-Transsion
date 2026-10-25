@@ -113,6 +113,11 @@ fn main() -> anyhow::Result<()> {
         brand, model, platform
     );
 
+    // Sync ColorOS OPlusFace enrollment system property on boot
+    let enrolled = oplus_face_bridge_transsion::service::has_enrolled_faces();
+    oplus_face_bridge_transsion::service::update_face_enrolled_prop(enrolled);
+    tracing::info!("Synced persist.sys.oplus.isFaceEnrolled = {} on boot", if enrolled { "1" } else { "0" });
+
     // Initialize Binder process state FIRST
     rsbinder::ProcessState::init_default().map_err(|error| {
         anyhow::anyhow!("failed to initialize Binder process state: {error}")
@@ -123,6 +128,13 @@ fn main() -> anyhow::Result<()> {
     let service = FaceService::new();
     let binder = BnFace::new_binder(service);
     rsbinder::hub::add_service(SERVICE_NAME, binder.as_binder())?;
+
+    // Also register the "virtual" instance; ColorOS FaceService queries it
+    // before falling back to a real HAL. Register the same binder.
+    const VIRTUAL_SERVICE_NAME: &str = "android.hardware.biometrics.face.IFace/virtual";
+    if let Err(e) = rsbinder::hub::add_service(VIRTUAL_SERVICE_NAME, binder.as_binder()) {
+        tracing::warn!("Could not register {}: {e}", VIRTUAL_SERVICE_NAME);
+    }
 
     tracing::info!(
         "Successfully registered {} with ServiceManager! Waiting for transactions...",
