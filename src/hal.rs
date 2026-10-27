@@ -157,14 +157,18 @@ static OFFSETS_V1: HalOffsets = HalOffsets {
 };
 
 // BuildId 99418dcb4982cf6d1d4a326ea618a5d4 (PKB110). GOT slots come from .rela.plt.
-// challenge/feeder offsets still need to be found for this build.
+// feeder offsets recovered from .gnu_debugdata symbol table on OPPO CPH2797 (mt6789):
+//   CameraHelper::requestPreviewBuffer(int, void(*)(const uint8_t*, unsigned short), void(*)()) = 0xdf40 (start)
+//   CameraHelper::closeCamera()                                                                  = 0xa910 (close)
+//   static CameraHelper instance, base of .bss                                                   = 0x18150 (ctx)
+// challenge-check offset still unknown for this build; patch is skipped (not observed to block enroll).
 static OFFSETS_V2: HalOffsets = HalOffsets {
     hmi: 0x18040,
     got_license: 0x145a0,
     got_open_camera: 0x14918,
     camera_id_strs: &[],
     challenge: None,
-    feeder: None,
+    feeder: Some((0xdf40, 0xa910, 0x18150)),
 };
 
 fn offsets_for(hmi_off: usize) -> Option<&'static HalOffsets> {
