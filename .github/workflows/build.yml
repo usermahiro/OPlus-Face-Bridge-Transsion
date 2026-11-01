@@ -74,6 +74,8 @@ jobs:
             echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS=-C link-arg=-fuse-ld=lld"
           } >> "$GITHUB_ENV"
 
+      # Library vendor (libstfaceunlockppl, libcamera2ndk_vendor, libmediandk)
+      # hanya ada di ROM. Untuk link di CI dibuat stub kosong; tidak ikut paket.
       - name: Link stubs
         run: |
           python3 scripts/ci_stubs.py src "$RUNNER_TEMP/stubrom" \
@@ -81,7 +83,9 @@ jobs:
           echo "ROM_TREE=$RUNNER_TEMP/stubrom" >> "$GITHUB_ENV"
 
       - name: Build
-        run: cargo build --release --locked --target aarch64-linux-android
+        run: |
+          grep -q 'ANDROID_16 | 37' third_party/rsbinder/src/hub/mod.rs || { echo 'rsbinder SDK37 patch missing'; exit 1; }
+          cargo build --release --target aarch64-linux-android
 
       - name: Verify binary
         run: scripts/ci_verify.sh target/aarch64-linux-android/release/face-hal-service
