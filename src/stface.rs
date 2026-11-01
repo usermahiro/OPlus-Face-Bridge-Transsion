@@ -17,23 +17,16 @@ use crate::logging;
 
 /// Offset of the SenseTime licence flag inside libstfaceunlockppl.so.
 ///
-/// `st_face_init_license` (0x939c8) reads one byte at
-/// `base + 0x33914e8` and returns 0 immediately when it is non-zero,
-/// skipping licence validation entirely; on failure it returns -14
-/// ("check license is not ok"). The stock X6739 licence is bound to the
-/// OEM build, so it never validates on a ported ROM and the algorithm
-/// cannot start. Setting the flag first makes the call succeed.
+/// For the Transsion 2.1.0.088.4.860-express build
+/// (`sha256 e435a6ada3a7e7006d4578795741a27ea4d8f2bed891952648f6ba2535ea8ea9`),
+/// `st_face_init_license` (0x859a8) calls 0x9bb80, which reads one byte at
+/// `base + 0x3c4d278` (`.bss`) and returns 0 immediately when it is
+/// non-zero, skipping licence validation entirely. On failure the licence
+/// check returns -14 ("check license is not ok").
 ///
-/// Verified on-device: with the flag set the call returns 0; without it
-/// it returns -14.
-const LICENSE_FLAG_OFFSET: usize = 0x33914e8;
-
-/// Offset of the SDK protector licence check inside libstfaceunlockppl.so.
-/// Patched to `mov w0, #0; ret` so it reports success.
-const PROTECTOR_CHECK_OFFSET: usize = 0x30b334;
-
-/// `mov w0, #0` / `ret`
-const ARM64_RETURN_ZERO: [u32; 2] = [0x5280_0000, 0xd65f_03c0];
+/// The old X6739 offset (0x33914e8) lands in `.rodata` on this build, so
+/// patching it had no effect on the licence and corrupted model data.
+const LICENSE_FLAG_OFFSET: usize = 0x3c4d278;
 
 /// Load base of libstfaceunlockppl.so in this process, if it is mapped.
 fn library_base() -> Option<usize> {
@@ -84,16 +77,13 @@ fn with_writable(
 
 /// Neutralise the SenseTime licence check so the algorithm can start.
 ///
-/// The stock licence is issued for the OEM ROM and fails validation with
-/// -14 on a ported ROM, which makes the whole face stack unusable. Two
-/// in-memory patches are applied before the first algorithm call:
+/// The stock licence is issued for the OEM ROM and can fail validation
+/// with -14 on a ported ROM, which makes the whole face stack unusable.
+/// Setting the internal "already licensed" flag at `base + 0x3c4d278`
+/// makes `st_face_init_license` short-circuit to success.
 ///
-/// * the internal "already licensed" flag at `base + 0x33914e8`, which
-///   makes `st_face_init_license` short-circuit to success, and
-/// * the SDK protector check at `base + 0x30b334`, patched to return 0.
-///
-/// Both offsets were confirmed against the X6739 copy of the library and
-/// verified on-device.
+/// Do not patch code here: the old `0x30b334` "protector check" lands in
+/// the middle of a NEON image-conversion routine on this build.
 pub fn bypass_license_check() {
     let base = match library_base() {
         Some(b) => b,
@@ -115,26 +105,6 @@ pub fn bypass_license_check() {
     logging::info(&format!(
         "stface: licence flag at 0x{:x} set to 1 ({}), base 0x{:x}",
         flag,
-        if ok { "ok" } else { "FAILED" },
-        base
-    ));
-
-    let check = base + PROTECTOR_CHECK_OFFSET;
-    let ok = with_writable(
-        check,
-        libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-        libc::PROT_READ | libc::PROT_EXEC,
-        || unsafe {
-            std::ptr::copy_nonoverlapping(
-                ARM64_RETURN_ZERO.as_ptr(),
-                check as *mut u32,
-                ARM64_RETURN_ZERO.len(),
-            );
-        },
-    );
-    logging::info(&format!(
-        "stface: SDK protector check at 0x{:x} patched ({}), base 0x{:x}",
-        check,
         if ok { "ok" } else { "FAILED" },
         base
     ));
@@ -224,14 +194,14 @@ pub const LICENSE_PATH: &[u8] = b"/vendor/media/license.lic\0";
 pub const LICENSE_PATH_ODM: &str = "/odm/etc/asset/face/license.lic";
 /// Camera id source, read at runtime by the stock HAL.
 pub const CAMERA_CHOOSE_PATH: &str = "/data/vendor_de/0/facedata/cameraChoose.txt";
-/// st_auth_set_identifier value used by the stock HAL.
+/// st_auth_set_identifier value used by the stock Transsion HAL.
 ///
-/// `default_face_hal::face_set_active_group` (0xa2ec in face.default.so)
-/// passes "mainuser" — confirmed from the log string
-/// "face_set_active_group mainuser" at 0x4db0. The earlier note
-/// "sensetime" was wrong; "sensetime" appears in the binary only as
-/// a DATA string, not as the argument to this call.
-pub const IDENTIFIER: &[u8] = b"mainuser\0";
+/// The stock `face.default.so` builds the argument at 0xbf18-0xbf20
+/// (`adrp x0, 0x4000; add x0, x0, #0x702`), which resolves to the
+/// NUL-terminated "sensetime" string at file offset 0x4702. The
+/// "mainuser" substring at 0x4db0 is only part of the
+/// "face_set_active_group mainuser" log line, not this call's argument.
+pub const IDENTIFIER: &[u8] = b"sensetime\0";
 /// Store path handed to st_auth_init. This is the *store path* the algorithm
 /// uses for its template data, not a group name: the library resolves the
 /// algorithm directory relative to it and returns -1002 ("GetAlgoFullPath
@@ -369,17 +339,11 @@ impl StFace {
         if !found {
             logging::info("stface: no licence file, continuing with an empty licence");
         }
-        // The library expects a C string; drop anything from the first NUL on.
-        if let Some(nul) = license.iter().position(|b| *b == 0) {
-            license.truncate(nul);
-        }
-        let lic_c = match std::ffi::CString::new(license) {
-            Ok(c) => c,
-            Err(_) => {
-                logging::error("stface: license is not a C string");
-                return Err(-2);
-            }
-        };
+        // The stock HAL passes the raw bytes read from license.lic, not a
+        // CString: the file can contain embedded NUL bytes. Keep every byte
+        // and append a terminator for the library's string APIs.
+        license.push(0);
+        let lic_buf = license;
 
         let version = unsafe { st_auth_get_version() };
         if !version.is_null() {
@@ -387,16 +351,16 @@ impl StFace {
             logging::info(&format!("stface: algorithm version {:?}", v));
         }
 
-        let r = unsafe { st_face_init_license(lic_c.as_ptr()) };
+        let r = unsafe { st_face_init_license(lic_buf.as_ptr() as *const c_char) };
         if r != ST_OK {
             logging::error(&format!("stface: st_face_init_license ret={}", r));
             return Err(r);
         }
 
         // The stock HAL opens the library's own log right after st_face_init_license
-        // succeeds (face.default.so, 0x7dec: st_face_open_log(3)).
+        // succeeds (Transsion face.default.so, 0x9210-0x9214: st_face_open_log(2)).
         logging::info("stface: opening library log");
-        let r = unsafe { st_face_open_log(3) };
+        let r = unsafe { st_face_open_log(2) };
         logging::info(&format!("stface: st_face_open_log ret={}", r));
 
 
