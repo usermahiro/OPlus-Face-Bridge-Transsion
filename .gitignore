@@ -1,4 +1,3 @@
-target/
-out/
-*.tar.gz
-*.zip
+# Cargo build output. Rebuildable with scripts/build.sh; never committed.
+/target/
+/dist/

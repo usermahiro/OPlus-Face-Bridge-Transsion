@@ -1,166 +1,115 @@
-name: Build & Release
+name: Build Face HAL
 
 on:
   push:
+    branches: [master, main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
     inputs:
-      tag_name:
-        description: 'Release tag (e.g. v1.0.0). Defaults to v<cargo-version>-<sha>'
-        required: false
-        type: string
-        default: ''
-      release_title:
-        description: 'Release title (defaults to tag name)'
-        required: false
-        type: string
-        default: ''
-      release_notes:
-        description: 'Custom release description in Markdown (leave empty to use default template)'
-        required: false
-        type: string
-        default: ''
-      draft:
-        description: 'Create draft release'
-        required: false
-        type: boolean
-        default: false
-      prerelease:
-        description: 'Mark as prerelease'
-        required: false
-        type: boolean
-        default: false
+      hal_name:
+        description: "Nama binary di /vendor/bin/hw"
+        default: "android.hardware.biometrics.face-service.default"
+      service_name:
+        description: "Nama service init"
+        default: "vendor.face-default"
+      rc_name:
+        description: "Nama file rc di /vendor/etc/init"
+        default: "android.hardware.biometrics.face-service.rc"
 
 permissions:
   contents: write
 
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  NDK_VERSION: r27c
+  ANDROID_API: "30"
+
 jobs:
   build:
-    name: Build & Package
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      HAL_NAME: ${{ inputs.hal_name || 'android.hardware.biometrics.face-service.default' }}
+      SERVICE_NAME: ${{ inputs.service_name || 'vendor.face-default' }}
+      RC_NAME: ${{ inputs.rc_name || 'android.hardware.biometrics.face-service.rc' }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      - name: Set up Android NDK
-        id: setup-ndk
+      - name: Android NDK
+        id: ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r26b
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: false
 
-      - name: Build release packages
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          API_LEVEL: 26
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Toolchain env
         run: |
-          chmod +x build.sh
-          ./build.sh release
+          TC="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64"
+          test -x "$TC/bin/aarch64-linux-android${ANDROID_API}-clang" || { echo "NDK clang not found in $TC"; exit 1; }
+          {
+            echo "NDK_TC=$TC"
+            echo "CC_aarch64_linux_android=$TC/bin/aarch64-linux-android${ANDROID_API}-clang"
+            echo "AR_aarch64_linux_android=$TC/bin/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TC/bin/aarch64-linux-android${ANDROID_API}-clang"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS=-C link-arg=-fuse-ld=lld"
+          } >> "$GITHUB_ENV"
 
-      - name: Upload workflow artifacts
+      - name: Link stubs
+        run: |
+          python3 scripts/ci_stubs.py src "$RUNNER_TEMP/stubrom" \
+            "$NDK_TC/bin/aarch64-linux-android${ANDROID_API}-clang"
+          echo "ROM_TREE=$RUNNER_TEMP/stubrom" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: cargo build --release --locked --target aarch64-linux-android
+
+      - name: Verify binary
+        run: scripts/ci_verify.sh target/aarch64-linux-android/release/face-hal-service
+
+      - name: Package ROM zip
+        id: pkg
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="$GITHUB_REF_NAME"; else V="${GITHUB_SHA::8}"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          VERSION="$V" scripts/ci_package.sh \
+            target/aarch64-linux-android/release/face-hal-service dist
+          ls -l dist
+
+      - name: Upload ROM zip
         uses: actions/upload-artifact@v4
         with:
-          name: face-vendor-package
-          path: |
-            out/face_vendor_package.zip
-            out/face_vendor_package.tar.gz
-            out/vendor/bin/hw/android.hardware.biometrics.face-service.default
-            out/vendor/etc/init/android.hardware.biometrics.face-service.default.rc
-            out/vendor/etc/vintf/manifest/manifest_face_transsion.xml
+          name: face-hal-rom-${{ steps.pkg.outputs.version }}
+          path: dist/face-hal-rom-${{ steps.pkg.outputs.version }}.zip
           if-no-files-found: error
 
-      - name: Publish GitHub release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_TAG: ${{ github.event.inputs.tag_name }}
-          INPUT_TITLE: ${{ github.event.inputs.release_title }}
-          INPUT_NOTES: ${{ github.event.inputs.release_notes }}
-          IS_DRAFT: ${{ github.event.inputs.draft }}
-          IS_PRERELEASE: ${{ github.event.inputs.prerelease }}
-        run: |
-          if [ -n "$INPUT_TAG" ]; then
-            TAG_NAME="$INPUT_TAG"
-          else
-            CARGO_VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
-            TAG_NAME="v${CARGO_VER:-1.0.0}-${GITHUB_SHA::7}"
-          fi
+      - name: Upload raw binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: face-hal-service-aarch64
+          path: target/aarch64-linux-android/release/face-hal-service
 
-          if [ -n "$INPUT_TITLE" ]; then
-            TITLE="$INPUT_TITLE"
-          else
-            TITLE="Release $TAG_NAME"
-          fi
-
-          SHA_BIN=$(sha256sum out/vendor/bin/hw/android.hardware.biometrics.face-service.default | awk '{print $1}')
-          SHA_RC=$(sha256sum out/vendor/etc/init/android.hardware.biometrics.face-service.default.rc | awk '{print $1}')
-          SHA_XML=$(sha256sum out/vendor/etc/vintf/manifest/manifest_face_transsion.xml | awk '{print $1}')
-          SHA_ZIP=$(sha256sum out/face_vendor_package.zip | awk '{print $1}')
-          SHA_TAR=$(sha256sum out/face_vendor_package.tar.gz | awk '{print $1}')
-
-          if [ -n "$INPUT_NOTES" ]; then
-            printf "%s\n\n---\n\n" "$INPUT_NOTES" > release_notes.md
-            cat << EOF >> release_notes.md
-          | Filename | Type | SELinux Context | SHA-256 Checksum |
-          | :--- | :--- | :--- | :--- |
-          | \`android.hardware.biometrics.face-service.default\` | ARM64 ELF | \`u:object_r:hal_face_oplus_exec:s0\` | \`$SHA_BIN\` |
-          | \`android.hardware.biometrics.face-service.default.rc\` | Android Init | \`u:object_r:vendor_configs_file:s0\` | \`$SHA_RC\` |
-          | \`manifest_face_transsion.xml\` | VINTF Fragment | \`u:object_r:vendor_configs_file:s0\` | \`$SHA_XML\` |
-          | \`face_vendor_package.zip\` | ROM Repack Bundle | N/A | \`$SHA_ZIP\` |
-          | \`face_vendor_package.tar.gz\` | ROM Repack Bundle | N/A | \`$SHA_TAR\` |
-
-          ### Build Information
-          - Target: \`aarch64-linux-android\` (API 26+)
-          - Target Location in ROM: \`/vendor/bin/hw/\`
-          - SELinux Context (Binary): \`u:object_r:hal_face_oplus_exec:s0\`
-          - SELinux Context (Configs): \`u:object_r:vendor_configs_file:s0\`
-          EOF
-          else
-            cat << EOF > release_notes.md
-          ## OPlus Face AIDL HAL Bridge for Transsion Devices
-
-          | Filename | Type | SELinux Context | SHA-256 Checksum |
-          | :--- | :--- | :--- | :--- |
-          | \`android.hardware.biometrics.face-service.default\` | ARM64 ELF | \`u:object_r:hal_face_oplus_exec:s0\` | \`$SHA_BIN\` |
-          | \`android.hardware.biometrics.face-service.default.rc\` | Android Init | \`u:object_r:vendor_configs_file:s0\` | \`$SHA_RC\` |
-          | \`manifest_face_transsion.xml\` | VINTF Fragment | \`u:object_r:vendor_configs_file:s0\` | \`$SHA_XML\` |
-          | \`face_vendor_package.zip\` | ROM Repack Bundle | N/A | \`$SHA_ZIP\` |
-          | \`face_vendor_package.tar.gz\` | ROM Repack Bundle | N/A | \`$SHA_TAR\` |
-
-          ### Build Information
-          - Target: \`aarch64-linux-android\` (API 26+)
-          - Target Location in ROM: \`/vendor/bin/hw/\`
-          - SELinux Context (Binary): \`u:object_r:hal_face_oplus_exec:s0\`
-          - SELinux Context (Configs): \`u:object_r:vendor_configs_file:s0\`
-          EOF
-          fi
-
-          EXTRA_FLAGS=""
-          if [ "$IS_DRAFT" = "true" ]; then
-            EXTRA_FLAGS="$EXTRA_FLAGS --draft"
-          fi
-          if [ "$IS_PRERELEASE" = "true" ]; then
-            EXTRA_FLAGS="$EXTRA_FLAGS --prerelease"
-          fi
-
-          RELEASE_FILES=(
-            "out/face_vendor_package.zip"
-            "out/face_vendor_package.tar.gz"
-            "out/vendor/bin/hw/android.hardware.biometrics.face-service.default"
-            "out/vendor/etc/init/android.hardware.biometrics.face-service.default.rc"
-            "out/vendor/etc/vintf/manifest/manifest_face_transsion.xml"
-          )
-
-          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release upload "$TAG_NAME" "${RELEASE_FILES[@]}" --clobber
-            gh release edit "$TAG_NAME" --title "$TITLE" --notes-file release_notes.md
-          else
-            gh release create "$TAG_NAME" \
-              "${RELEASE_FILES[@]}" \
-              --title "$TITLE" \
-              --notes-file release_notes.md \
-              --generate-notes \
-              $EXTRA_FLAGS
-          fi
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/face-hal-rom-${{ steps.pkg.outputs.version }}.zip

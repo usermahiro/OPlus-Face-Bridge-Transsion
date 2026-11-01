@@ -1,31 +1,40 @@
 [package]
-name = "oplus-face-bridge-transsion"
+name = "face-hal"
 version = "1.0.0"
 edition = "2021"
-description = "Universal Face AIDL HAL Bridge for Transsion Devices (Tecno/Infinix/Itel) on OPlus ROMs"
+authors = ["ryanistr"]
 license = "Apache-2.0"
+description = "AIDL face HAL (android.hardware.biometrics.face.IFace) for Android, driving the front camera and the SenseTime face algorithm"
+repository = "https://github.com/ryanistr/vendor-senseface-aidl"
 
+# The staged filename is android.hardware.biometrics.face-service, but a Rust
+# crate/bin name cannot contain '.', so the crate builds as face-hal-service and
+# scripts/stage_vendor.sh installs it under the real name.
 [[bin]]
-name = "android-hardware-biometrics-face-service-transsion"
+name = "face-hal-service"
 path = "src/main.rs"
 
+# Device-side self test for the algorithm binding. Not shipped: scripts/
+# stage_vendor.sh only installs face-hal-service.
+[[bin]]
+name = "face-selftest"
+path = "src/selftest.rs"
+
 [dependencies]
-rsbinder = { version = "=0.10.0", features = ["android_10_plus"] }
+rsbinder = { version = "0.6.0", features = ["android_14"] }
 async-trait = "0.1"
-anyhow = "=1.0"
-parking_lot = "0.12"
 libc = "0.2"
-tracing = "=0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
-tracing-log = "=0.2"
+# rsbinder reports parcel/dispatch failures through the `log` facade. Without a
+# logger installed those messages go nowhere, which makes an unmarshal failure
+# indistinguishable from a HAL that never received the transaction.
+log = "0.4"
 
 [build-dependencies]
-rsbinder-aidl = "=0.10.0"
-cc = "1.0"
+rsbinder-aidl = "=0.6.0"
 
 [profile.release]
-opt-level = "z"
-lto = true
+opt-level = "s"
+lto = "fat"
 codegen-units = 1
-strip = false
 panic = "abort"
+strip = true

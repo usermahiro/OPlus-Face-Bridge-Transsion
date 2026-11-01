@@ -1,147 +1,50 @@
-#![allow(non_snake_case)]
+// FaceHAL/src/main.rs
+//
+// Entry point for the AIDL face HAL. Registers
+// android.hardware.biometrics.face.IFace/default on the vndbinder, which is
+// what the OOS (Android 15) framework's FaceService binds to.
+//
+// The stock X6739 stack only ever exposed the HIDL
+// android.hardware.biometrics.face@1.0::IBiometricsFace/default (a stub named
+// "...-service.example" plus face.default.so); this binary is the AIDL
+// replacement that closes that gap.
+mod bindings;
+mod camera;
+mod face;
+mod logging;
+mod session;
+mod stface;
+mod surface_bridge;
 
-use oplus_face_bridge_transsion::android::hardware::biometrics::face::IFace::BnFace;
-use oplus_face_bridge_transsion::service::FaceService;
-use oplus_face_bridge_transsion::SERVICE_NAME;
+use rsbinder::{hub, ProcessState};
 
-#[cfg(target_os = "android")]
-extern "C" {
-    fn __system_property_get(name: *const libc::c_char, value: *mut libc::c_char) -> libc::c_int;
-}
+use bindings::android::hardware::biometrics::face::IFace::BnFace;
+use face::FaceHal;
 
-#[cfg(not(target_os = "android"))]
-unsafe fn __system_property_get(_name: *const libc::c_char, _value: *mut libc::c_char) -> libc::c_int {
-    0
-}
+const SERVICE_NAME: &str = "android.hardware.biometrics.face.IFace/default";
 
-fn get_system_prop(key: &[u8], default: &str) -> String {
-    let mut val = [0u8; 92];
-    let len = unsafe {
-        __system_property_get(key.as_ptr() as *const libc::c_char, val.as_mut_ptr() as *mut libc::c_char)
-    };
-    if len > 0 {
-        String::from_utf8_lossy(&val[..len as usize]).into_owned()
-    } else {
-        default.to_string()
-    }
-}
+fn main() {
+    logging::init();
+    logging::init_rsbinder_logger();
+    logging::info("Face HAL (AIDL, rsbinder) starting");
 
-#[cfg(target_os = "android")]
-extern "C" {
-    fn __android_log_print(prio: libc::c_int, tag: *const libc::c_char, fmt: *const libc::c_char, ...) -> libc::c_int;
-}
+    // Default driver + a thread pool sized for the camera callback path.
+    ProcessState::init_default();
+    ProcessState::start_thread_pool();
+    surface_bridge::init_hidl_thread_pool();
 
-#[cfg(target_os = "android")]
-#[derive(Clone)]
-struct AndroidLogWriter {
-    tag: std::ffi::CString,
-}
-
-#[cfg(target_os = "android")]
-impl std::io::Write for AndroidLogWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let msg = String::from_utf8_lossy(buf);
-        let trimmed = msg.trim_end_matches('\n');
-        if !trimmed.is_empty() {
-            let c_msg = std::ffi::CString::new(trimmed).unwrap_or_default();
-            let fmt = std::ffi::CStr::from_bytes_with_nul(b"%s\0").unwrap();
-            unsafe {
-                __android_log_print(4, self.tag.as_ptr(), fmt.as_ptr(), c_msg.as_ptr());
-            }
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "android")]
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for AndroidLogWriter {
-    type Writer = AndroidLogWriter;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-fn init_logging() {
-    let _ = tracing_log::LogTracer::init();
-
-    #[cfg(target_os = "android")]
-    {
-        use tracing_subscriber::fmt::format::Format;
-
-        let writer = AndroidLogWriter {
-            tag: std::ffi::CString::new("face_transsion").unwrap(),
-        };
-
-        let _ = tracing_subscriber::fmt()
-            .event_format(Format::default().without_time())
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .with_writer(writer)
-            .with_ansi(false)
-            .try_init();
-    }
-
-    #[cfg(not(target_os = "android"))]
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
-}
-
-fn main() -> anyhow::Result<()> {
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
-    }
-
-    init_logging();
-
-    let brand = get_system_prop(b"ro.product.brand\0", "Transsion");
-    let model = get_system_prop(b"ro.product.model\0", "Device");
-    let platform = get_system_prop(b"ro.board.platform\0", "Universal");
-
-    tracing::info!(
-        "Starting android.hardware.biometrics.face-service for Transsion ({} {}, SoC: {})...",
-        brand, model, platform
-    );
-
-    // Sync ColorOS OPlusFace enrollment system property on boot
-    let enrolled = oplus_face_bridge_transsion::service::has_enrolled_faces();
-    oplus_face_bridge_transsion::service::update_face_enrolled_prop(enrolled);
-    tracing::info!("Synced persist.sys.oplus.isFaceEnrolled = {} on boot", if enrolled { "1" } else { "0" });
-
-    // Initialize Binder process state FIRST
-    rsbinder::ProcessState::init_default().map_err(|error| {
-        anyhow::anyhow!("failed to initialize Binder process state: {error}")
-    })?;
-    rsbinder::ProcessState::start_thread_pool();
-
-    // Register AIDL face service IMMEDIATELY so ServiceManager & system_server never wait/deadlock
-    let service = FaceService::new();
+    let service = FaceHal::new();
     let binder = BnFace::new_binder(service);
-    rsbinder::hub::add_service(SERVICE_NAME, binder.as_binder())?;
 
-    // Also register the "virtual" instance; ColorOS FaceService queries it
-    // before falling back to a real HAL. Register the same binder.
-    const VIRTUAL_SERVICE_NAME: &str = "android.hardware.biometrics.face.IFace/virtual";
-    if let Err(e) = rsbinder::hub::add_service(VIRTUAL_SERVICE_NAME, binder.as_binder()) {
-        tracing::warn!("Could not register {}: {e}", VIRTUAL_SERVICE_NAME);
+    match hub::add_service(SERVICE_NAME, binder.as_binder()) {
+        Ok(()) => logging::info(&format!("registered {}", SERVICE_NAME)),
+        Err(e) => {
+            logging::error(&format!("failed to register {}: {:?}", SERVICE_NAME, e));
+            // Nothing useful can happen without the service, so exit and let
+            // init's restart policy retry rather than idling silently.
+            std::process::exit(1);
+        }
     }
 
-    tracing::info!(
-        "Successfully registered {} with ServiceManager! Waiting for transactions...",
-        SERVICE_NAME
-    );
-
-    // Hardware HAL and SenseTime engine will be lazily loaded on first createSession() call
-    rsbinder::ProcessState::join_thread_pool()?;
-    Ok(())
+    let _ = ProcessState::join_thread_pool();
 }
