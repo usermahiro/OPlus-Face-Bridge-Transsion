@@ -83,9 +83,7 @@ jobs:
           echo "ROM_TREE=$RUNNER_TEMP/stubrom" >> "$GITHUB_ENV"
 
       - name: Build
-        run: |
-          grep -q 'ANDROID_16 | 37' third_party/rsbinder/src/hub/mod.rs || { echo 'rsbinder SDK37 patch missing'; exit 1; }
-          cargo build --release --target aarch64-linux-android
+        run: cargo build --release --locked --target aarch64-linux-android
 
       - name: Verify binary
         run: scripts/ci_verify.sh target/aarch64-linux-android/release/face-hal-service

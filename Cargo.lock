@@ -628,6 +628,8 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rsbinder"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1267bd2c418166a7c727ac27e086ce1e3331c74afcaf28a0a8a362378363adb7"
 dependencies = [
  "async-trait",
  "downcast-rs",
