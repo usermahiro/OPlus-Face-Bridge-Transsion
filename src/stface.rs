@@ -226,9 +226,12 @@ pub const LICENSE_PATH_ODM: &str = "/odm/etc/asset/face/license.lic";
 pub const CAMERA_CHOOSE_PATH: &str = "/data/vendor_de/0/facedata/cameraChoose.txt";
 /// st_auth_set_identifier value used by the stock HAL.
 ///
-/// `default_face_hal::set_active_group` passes the string at 0x5db8 in
-/// face.default.so, which is "sensetime".
-pub const IDENTIFIER: &[u8] = b"sensetime\0";
+/// `default_face_hal::face_set_active_group` (0xa2ec in face.default.so)
+/// passes "mainuser" — confirmed from the log string
+/// "face_set_active_group mainuser" at 0x4db0. The earlier note
+/// "sensetime" was wrong; "sensetime" appears in the binary only as
+/// a DATA string, not as the argument to this call.
+pub const IDENTIFIER: &[u8] = b"mainuser\0";
 /// Store path handed to st_auth_init. This is the *store path* the algorithm
 /// uses for its template data, not a group name: the library resolves the
 /// algorithm directory relative to it and returns -1002 ("GetAlgoFullPath
@@ -384,19 +387,17 @@ impl StFace {
             logging::info(&format!("stface: algorithm version {:?}", v));
         }
 
-        // The stock HAL opens the library's own log right after the licence
-        // (face.default.so, 0x7dec: st_face_open_log(3)). Without it the
-        // library stays silent and a failing enrollment gives no reason. Open it
-        // before anything else so even an init failure is explained.
-        logging::info("stface: opening library log");
-        let r = unsafe { st_face_open_log(3) };
-        logging::info(&format!("stface: st_face_open_log ret={}", r));
-
         let r = unsafe { st_face_init_license(lic_c.as_ptr()) };
         if r != ST_OK {
             logging::error(&format!("stface: st_face_init_license ret={}", r));
             return Err(r);
         }
+
+        // The stock HAL opens the library's own log right after st_face_init_license
+        // succeeds (face.default.so, 0x7dec: st_face_open_log(3)).
+        logging::info("stface: opening library log");
+        let r = unsafe { st_face_open_log(3) };
+        logging::info(&format!("stface: st_face_open_log ret={}", r));
 
 
 
