@@ -27,4 +27,8 @@ echo "== st_* imports"
 readelf --dyn-syms "$BIN" | awk '$7=="UND" && $8 ~ /^st_/ {print "  "$8}' | sort -u | tee /tmp/st.txt
 grep -q st_auth_enroll /tmp/st.txt || { echo "FAIL: st_auth_enroll not imported"; exit 1; }
 
+echo "== licence fix"
+grep -aq "continuing with an empty licence" "$BIN" || { echo "FAIL: binary tanpa kode lisensi terbaru"; exit 1; }
+grep -aq "/odm/etc/asset/face/license.lic" "$BIN" || { echo "FAIL: path lisensi /odm tidak ada di binary"; exit 1; }
+
 echo "verify OK ($(stat -c%s "$BIN") bytes)"

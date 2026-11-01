@@ -220,6 +220,8 @@ impl StImage {
 
 /// Values the stock HAL passes; see re/notes/face-hal-re.md.
 pub const LICENSE_PATH: &[u8] = b"/vendor/media/license.lic\0";
+/// Lokasi lisensi di ROM port (ColorOS/COS): /odm, bukan /vendor/media.
+pub const LICENSE_PATH_ODM: &str = "/odm/etc/asset/face/license.lic";
 /// Camera id source, read at runtime by the stock HAL.
 pub const CAMERA_CHOOSE_PATH: &str = "/data/vendor_de/0/facedata/cameraChoose.txt";
 /// st_auth_set_identifier value used by the stock HAL.
@@ -322,12 +324,52 @@ impl StFace {
         // The stock licence only validates on the OEM ROM. Neutralise the
         // check before the first algorithm call, otherwise the algorithm
         // refuses to start with -14 and enrollment can never run.
-        bypass_license_check();
+        // persist.sys.facehal.patch_license=0 skips the in-memory patches (use it when
+        // the device has a licence that validates, or when the library build differs
+        // from the X6739 one these offsets were taken from).
+        if logging::get_prop(b"persist.sys.facehal.patch_license\0").as_deref() == Some("0") {
+            logging::info("stface: licence patches disabled by persist.sys.facehal.patch_license=0");
+        } else {
+            bypass_license_check();
+        }
 
-        let license = read_file(LICENSE_PATH).ok_or_else(|| {
-            logging::error("stface: license file unreadable");
-            -1
-        })?;
+        // The licence content is only needed when the check is NOT short-circuited.
+        // With the "already licensed" flag set, st_face_init_license returns 0 without
+        // looking at its argument, so a missing /vendor/media/license.lic (ported ROMs
+        // often do not ship it) must not abort init. Try the property override first,
+        // then the stock path; if neither is readable continue with an empty licence and
+        // let st_face_init_license report the real result.
+        let mut license: Vec<u8> = Vec::new();
+        let override_path = logging::get_prop(b"persist.sys.facehal.license_path\0");
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(p) = override_path.filter(|p| !p.is_empty()) {
+            candidates.push(p);
+        }
+        candidates.push(LICENSE_PATH_ODM.to_string());
+        candidates.push(
+            String::from_utf8_lossy(&LICENSE_PATH[..LICENSE_PATH.len() - 1]).into_owned(),
+        );
+        let mut found = false;
+        for path in &candidates {
+            match std::fs::read(path) {
+                Ok(data) => {
+                    logging::info(&format!("stface: licence read from {} ({} bytes)", path, data.len()));
+                    license = data;
+                    found = true;
+                    break;
+                }
+                Err(e) => {
+                    logging::error(&format!("stface: licence {} unreadable: {}", path, e));
+                }
+            }
+        }
+        if !found {
+            logging::info("stface: no licence file, continuing with an empty licence");
+        }
+        // The library expects a C string; drop anything from the first NUL on.
+        if let Some(nul) = license.iter().position(|b| *b == 0) {
+            license.truncate(nul);
+        }
         let lic_c = match std::ffi::CString::new(license) {
             Ok(c) => c,
             Err(_) => {

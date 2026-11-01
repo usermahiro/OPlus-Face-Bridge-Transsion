@@ -38,3 +38,10 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# rsbinder 0.6.0 panics on SDK 37 ("Unsupported Android SDK version: 37"), which
+# kills the HAL at startup on Android 17 ROMs. third_party/rsbinder is 0.6.0
+# unchanged except for mapping SDK 37 to the android_16 service manager (the same
+# mapping rsbinder 0.12 uses). See third_party/rsbinder/src/hub/mod.rs.
+[patch.crates-io]
+rsbinder = { path = "third_party/rsbinder" }
