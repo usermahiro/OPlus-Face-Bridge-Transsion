@@ -120,6 +120,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('build {0}', steps.pkg.outputs.version) }}
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          generate_release_notes: true
           files: |
             dist/face-hal-rom-${{ steps.pkg.outputs.version }}.zip
             target/aarch64-linux-android/release/face-hal-service

@@ -366,19 +366,16 @@ impl CameraEngine {
                     logging::error(&format!("camera: AImageReader_newWithUsage ret={}", res));
                     return false;
                 }
-                // The output's raw native handle is what the vendor camera2ndk
-                // wants (it has no ANativeWindow support of its own).
-                let mut handle: *mut c_void = ptr::null_mut();
-                let handle_status =
-                    AImageReader_getWindowNativeHandle(self.reader, &mut handle);
-                if handle_status != AMEDIA_OK || handle.is_null() {
+                let mut window: *mut ANativeWindow = ptr::null_mut();
+                let handle_status = AImageReader_getWindow(self.reader, &mut window);
+                if handle_status != AMEDIA_OK || window.is_null() {
                     logging::error(&format!(
-                        "camera: AImageReader_getWindowNativeHandle ret={}",
+                        "camera: AImageReader_getWindow ret={}",
                         handle_status
                     ));
                     return false;
                 }
-                self.window_handle = handle;
+                self.window_handle = window as *mut c_void;
             }
 
             if !self.image_callback_ctx.is_null() {

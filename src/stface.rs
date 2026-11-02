@@ -26,7 +26,8 @@ use crate::logging;
 ///
 /// The old X6739 offset (0x33914e8) lands in `.rodata` on this build, so
 /// patching it had no effect on the licence and corrupted model data.
-const LICENSE_FLAG_OFFSET: usize = 0x3c4d278;
+const LICENSE_APPID_CHECK_OFFSET: usize = 0x4504ac;
+const B_0X450268: u32 = 0x17ffff6f;
 
 /// Load base of libstfaceunlockppl.so in this process, if it is mapped.
 fn library_base() -> Option<usize> {
@@ -93,18 +94,18 @@ pub fn bypass_license_check() {
         }
     };
 
-    let flag = base + LICENSE_FLAG_OFFSET;
+    let target = base + LICENSE_APPID_CHECK_OFFSET;
     let ok = with_writable(
-        flag,
-        libc::PROT_READ | libc::PROT_WRITE,
-        libc::PROT_READ | libc::PROT_WRITE,
+        target,
+        libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+        libc::PROT_READ | libc::PROT_EXEC,
         || unsafe {
-            *(flag as *mut u8) = 1;
+            *(target as *mut u32) = B_0X450268;
         },
     );
     logging::info(&format!(
-        "stface: licence flag at 0x{:x} set to 1 ({}), base 0x{:x}",
-        flag,
+        "stface: licence appid check at 0x{:x} patched ({}), base 0x{:x}",
+        target,
         if ok { "ok" } else { "FAILED" },
         base
     ));

@@ -52,7 +52,7 @@ impl IFace for FaceHal {
                 }],
             },
             sensorType: FaceSensorType::RGB,
-            halControlsPreview: true,
+            halControlsPreview: false,
             previewDisplayId: 0,
             enrollPreviewWidth: 480,
             enrollPreviewHeight: 640,
