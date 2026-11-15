@@ -155,6 +155,31 @@ adb shell am start -a android.settings.FACE_ENROLL
 The framework puts a credential prompt in front of the enrollment page, so the phone has
 to be unlocked first.
 
+### Preview probe
+
+`face-layer-probe` answers one question the HAL cannot answer by reading its input: on this
+ROM `system_server` has no `android.hidl.token@1.0::ITokenManager`, so `enroll` arrives with
+`fd=0 ints=[0]` and there is no surface to draw into. The probe bypasses the token entirely
+and asks SurfaceFlinger for a layer of its own, then fills it with magenta.
+
+It works from a `system`-uid process because SurfaceFlinger's
+`callingThreadHasUnscopedSurfaceFlingerAccess()` returns true for `AID_SYSTEM`, which is what
+keeps a parentless layer in the hierarchy.
+
+```bash
+adb push target/aarch64-linux-android/release/face-layer-probe /data/local/tmp/facework/
+adb shell su -c 'chmod 755 /data/local/tmp/facework/face-layer-probe'
+adb shell su -c 'su system -c /data/local/tmp/facework/face-layer-probe'
+```
+
+The layer stays up for 30 seconds. Read the result in `logcat -s FaceHalHW`:
+
+- `missing symbol _ZN7android...` — libgui on this ROM does not export what the probe calls;
+  the name in the log says which one, and a `strings libgui.so` check settles it.
+- `createSurfaceChecked ret=-1` or `-13` — SurfaceFlinger rejected the layer (permission).
+- `createSurfaceChecked ret=0` then `unlockAndPost ret=0` and a magenta rectangle — the layer
+  route is usable and the preview can be built on top of it.
+
 ## Credits
 
 SenseTime wrote the face algorithm, `libstfaceunlockppl.so`, and its license file sits in
