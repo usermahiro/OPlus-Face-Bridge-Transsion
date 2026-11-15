@@ -31,16 +31,60 @@ if [[ -n "$PROBE" ]]; then
     cat > "$STAGE/tools/README_PROBE.txt" <<'TXT'
 face-layer-probe is a diagnostic, not part of the HAL. It creates a
 SurfaceFlinger layer of its own, fills it with magenta and holds it for 30
-seconds, then exits. Run it as the same uid the HAL uses:
+seconds, then exits. Nothing is mounted and no service is restarted: run it
+straight from /data/local/tmp.
 
-    adb push tools/face-layer-probe /data/local/tmp/facework/
-    adb shell su -c 'chmod 755 /data/local/tmp/facework/face-layer-probe'
-    adb shell su -c 'su system -c /data/local/tmp/facework/face-layer-probe'
-    adb logcat -s FaceHalHW
+    sh tools/run-probe.sh
 
-Expected lines: "createSurfaceChecked ret=0", "unlockAndPost ret=0".
-A missing symbol is logged by name. See README.md, "Preview probe".
+Or by hand, as the same uid the HAL uses:
+
+    cp tools/face-layer-probe /data/local/tmp/facework/
+    chmod 755 /data/local/tmp/facework/face-layer-probe
+    /data/local/tmp/facework/face-layer-probe
+
+Expected lines, in this order:
+
+    createSurfaceChecked ret=0
+    connect(CPU) ret=0
+    dequeueBuffer ret=0
+    GraphicBuffer::lock ret=0 addr=... bpp=4 bytes_per_stride=...
+    queueBuffer ret=0
+
+Then a magenta rectangle stays on screen for 30 seconds. A missing symbol is
+logged by name. See README.md, "Preview probe".
 TXT
+    cat > "$STAGE/tools/run-probe.sh" <<'TXT'
+#!/system/bin/sh
+# run-probe.sh - run the layer diagnostic without mounting anything.
+# The probe creates its own SurfaceFlinger layer, so it needs no /vendor path
+# and no init service: /data/local/tmp is enough.
+set -eu
+HERE=$(cd "$(dirname "$0")" && pwd)
+DST=/data/local/tmp/facework/face-layer-probe
+
+SRC=
+for c in "$HERE/face-layer-probe" "$HERE/tools/face-layer-probe" "$HERE/../tools/face-layer-probe"; do
+    if [ -f "$c" ]; then
+        SRC=$c
+        break
+    fi
+done
+if [ -z "$SRC" ]; then
+    echo "face-layer-probe tidak ada di $HERE, $HERE/tools, atau $HERE/../tools" >&2
+    exit 1
+fi
+
+mkdir -p /data/local/tmp/facework
+cp -f "$SRC" "$DST"
+chmod 0755 "$DST"
+
+echo "[probe] pakai $SRC"
+echo "[probe] kotak magenta tampil 30 detik, lihat layar sekarang"
+"$DST" || echo "[probe] exit=$?"
+echo "[probe] log:"
+logcat -d -s FaceHalHW | grep -i "layer-probe" | tail -n 25
+TXT
+    chmod 0755 "$STAGE/tools/run-probe.sh"
 fi
 
 cat > "$STAGE/vendor/etc/init/$RC_NAME" <<RC
