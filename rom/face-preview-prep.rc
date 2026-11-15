@@ -11,16 +11,11 @@
 # shell_data_file and every exec of it would be denied. restorecon applies the
 # entry that install_to_rom.sh appends to plat_file_contexts.
 #
-# post-fs-data, not late_start: the HAL starts in late_start and would race this
-# action otherwise.
-on post-fs-data
-    # The parent is created by the platform's own post-fs-data action. If a ROM
-    # creates it later than this file is parsed, the mkdir below fails with
-    # ENOENT and nothing is copied, which shows up as "preview missing" with a
-    # perfectly working HAL. Creating the parents first costs two lines and
-    # removes the ordering assumption.
-    mkdir /data/local 0771 root root
-    mkdir /data/local/tmp 0771 shell shell
+# sys.boot_completed, not post-fs-data: everything this needs is up by then
+# (/data mounted, /data/local/tmp created, property service running), so no
+# ordering assumption is left. The HAL has already started at that point, hence
+# the restart at the end: it is what makes it re-exec from the new copy.
+on property:sys.boot_completed=1
     mkdir /data/local/tmp/facehal 0775 system system
     copy /vendor/bin/hw/@HAL_NAME@ /data/local/tmp/facehal/@HAL_NAME@
     chmod 0755 /data/local/tmp/facehal/@HAL_NAME@
@@ -30,3 +25,4 @@ on post-fs-data
     chmod 0755 /data/local/tmp/facehal/@HAL_NAME@.unrestr
     chown system system /data/local/tmp/facehal/@HAL_NAME@.unrestr
     restorecon /data/local/tmp/facehal/@HAL_NAME@.unrestr
+    restart @SERVICE_NAME@

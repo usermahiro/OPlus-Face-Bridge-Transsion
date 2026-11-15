@@ -45,12 +45,22 @@ Yang harus ada di ROM supaya itu terjadi tanpa langkah manual:
 
 | file | isi |
 |---|---|
-| `vendor/etc/init/face-preview-prep.rc` | `on post-fs-data`: `mkdir`, `copy` dua kali, `chmod`, `chown`, `restorecon` |
+| `vendor/etc/init/face-preview-prep.rc` | `on property:sys.boot_completed=1`: `mkdir`, `copy` dua kali, `chmod`, `chown`, `restorecon`, lalu `restart` HAL |
 | `system/etc/selinux/plat_file_contexts` | dua baris dari `config/plat_file_contexts.add` |
 
 `install_to_rom.sh` memasang keduanya. Label harus dari `plat_file_contexts`, bukan
 `vendor_file_contexts`: file itu tidak boleh memberi label pada path `/data`. Tanpa entrinya
 salinan tetap `shell_data_file`, `restorecon` tidak mengubahnya, dan exec ditolak.
+
+Aksinya jalan di `sys.boot_completed`, bukan `post-fs-data`: saat itu `/data`,
+`/data/local/tmp`, dan property service sudah pasti siap, jadi tidak ada asumsi urutan init
+yang tersisa. HAL sudah start sebelum itu, karena itu aksinya diakhiri `restart` — restart
+itulah yang membuatnya mengeksekusi ulang diri dari salinan baru. Efek sampingnya satu kali
+restart di awal boot, kira-kira sedetik tanpa sensor.
+
+Kalau ROM-mu dulu menggabungkan perintah ini ke rc service
+(`android.hardware.biometrics.face-service.rc`), hapus blok itu. Dua salinan tidak merusak,
+tapi yang di rc service memakai trigger lama dan bikin bingung saat membaca log.
 
 Cek sekali setelah flash:
 

@@ -119,7 +119,7 @@ printf '/(vendor|system/vendor)/bin/hw/%s u:object_r:hal_face_default_exec:s0\n'
 
 # Same step, as init actions: the HAL re-executes itself from /data/local/tmp
 # because a vendor-class process cannot open libgui.so.
-sed -e "s|@HAL_NAME@|$HAL_NAME|g" \
+sed -e "s|@HAL_NAME@|$HAL_NAME|g" -e "s|@SERVICE_NAME@|$SERVICE_NAME|g" \
     "$HERE/rom/face-preview-prep.rc" > "$STAGE/vendor/etc/init/face-preview-prep.rc"
 
 cat > "$STAGE/names.env" <<NAMES
