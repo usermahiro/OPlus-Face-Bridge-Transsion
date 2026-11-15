@@ -109,7 +109,15 @@ Output artifact `face-hal-rom-<version>.zip`:
 vendor/bin/hw/<HAL_NAME>            vendor/etc/init/<RC_NAME>
 vendor/etc/vintf/face_aidl_fragment.xml   config/vendor_file_contexts.add
 install_to_rom.sh   README_IMPLEMENT.md   SHA256SUMS
+script.sh   tools/face-layer-probe   tools/README_PROBE.txt
 ```
+
+`script.sh` bind-mounts the built HAL over `/vendor/bin/hw/<HAL_NAME>`, restarts the
+service and prints the log, so a build can be tested without repacking. `unmount` puts the
+stock binary back.
+
+`tools/` holds the preview probe only. `install_to_rom.sh` ignores it, init never starts
+it, and the release attaches the raw probe binary next to the HAL.
 
 Run it manually from the Actions tab (`Run workflow`) to override the binary, service and rc
 names. Pushing a `v*` tag also attaches the zip to a GitHub Release. Apply it to an unpacked
@@ -128,6 +136,21 @@ The script fails if the init rc, the interface name or the VINTF entry disagree 
 the binary registers.
 
 ### Test on a device without repacking
+
+The zip carries `script.sh`, which does the bind mount and the service restart:
+
+```bash
+# from the folder the zip was extracted into, as root
+su -c "sh $(pwd)/script.sh"          # mount the built HAL, restart, print the log
+su -c "sh $(pwd)/script.sh unmount"  # drop the mount, back to the stock binary
+```
+
+It refuses to run without root, unmounts a leftover mount on the same target first, copies
+the binary to `/data/local/tmp/facework`, sets `hal_face_default_exec` on it (without that
+label init's exec is denied by SELinux), bind-mounts it over the vendor path and then runs
+`stop`/`start` on the service.
+
+Doing it by hand is still possible:
 
 init cannot run a HAL whose binary lives in `/data`, so the replacement has to be started
 by hand with the stock service stopped:

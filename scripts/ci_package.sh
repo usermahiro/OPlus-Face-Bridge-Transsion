@@ -1,10 +1,11 @@
 #!/bin/bash
 # Assembles the ROM-ready zip from a built binary.
-# Usage: scripts/ci_package.sh <binary> <out_dir>
+# Usage: scripts/ci_package.sh <binary> <out_dir> [probe_binary]
 # Env  : HAL_NAME SERVICE_NAME RC_NAME VERSION (all optional)
 set -euo pipefail
-BIN="${1:?usage: ci_package.sh <binary> <out_dir>}"
-OUT="${2:?usage: ci_package.sh <binary> <out_dir>}"
+BIN="${1:?usage: ci_package.sh <binary> <out_dir> [probe_binary]}"
+OUT="${2:?usage: ci_package.sh <binary> <out_dir> [probe_binary]}"
+PROBE="${3:-}"
 HERE="$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")"
 
 HAL_NAME="${HAL_NAME:-android.hardware.biometrics.face-service.default}"
@@ -19,6 +20,28 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/vendor/bin/hw" "$STAGE/vendor/etc/init" "$STAGE/vendor/etc/vintf" "$STAGE/config"
 
 install -m 0755 "$BIN" "$STAGE/vendor/bin/hw/$HAL_NAME"
+
+# Optional diagnostic: never installed into /vendor, never started by init. It
+# is here so the same zip can answer "can this HAL draw on its own" on a device
+# where system_server cannot mint a preview token.
+if [[ -n "$PROBE" ]]; then
+    [[ -f "$PROBE" ]] || { echo "probe binary not found: $PROBE"; exit 1; }
+    mkdir -p "$STAGE/tools"
+    install -m 0755 "$PROBE" "$STAGE/tools/face-layer-probe"
+    cat > "$STAGE/tools/README_PROBE.txt" <<'TXT'
+face-layer-probe is a diagnostic, not part of the HAL. It creates a
+SurfaceFlinger layer of its own, fills it with magenta and holds it for 30
+seconds, then exits. Run it as the same uid the HAL uses:
+
+    adb push tools/face-layer-probe /data/local/tmp/facework/
+    adb shell su -c 'chmod 755 /data/local/tmp/facework/face-layer-probe'
+    adb shell su -c 'su system -c /data/local/tmp/facework/face-layer-probe'
+    adb logcat -s FaceHalHW
+
+Expected lines: "createSurfaceChecked ret=0", "unlockAndPost ret=0".
+A missing symbol is logged by name. See README.md, "Preview probe".
+TXT
+fi
 
 cat > "$STAGE/vendor/etc/init/$RC_NAME" <<RC
 service $SERVICE_NAME /vendor/bin/hw/$HAL_NAME
@@ -53,6 +76,9 @@ FQNAME="$FQNAME"
 NAMES
 
 install -m 0755 "$HERE/rom/install_to_rom.sh" "$STAGE/install_to_rom.sh"
+sed -e "s|@HAL_NAME@|$HAL_NAME|g" -e "s|@SERVICE_NAME@|$SERVICE_NAME|g" \
+    "$HERE/rom/runtimetest.sh" > "$STAGE/script.sh"
+chmod 0755 "$STAGE/script.sh"
 sed -e "s|@HAL_NAME@|$HAL_NAME|g" -e "s|@SERVICE_NAME@|$SERVICE_NAME|g" \
     -e "s|@RC_NAME@|$RC_NAME|g" -e "s|@VERSION@|$VERSION|g" \
     "$HERE/rom/README_IMPLEMENT.md" > "$STAGE/README_IMPLEMENT.md"

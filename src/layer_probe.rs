@@ -69,7 +69,7 @@ struct ANativeWindow_Buffer {
 /// part of any header this crate can see; a constructor only ever writes within
 /// its own sizeof, so a larger buffer is safe.
 #[repr(C, align(16))]
-struct Blob([u8; 1024]);
+struct Blob([u8; 4096]);
 
 // Method table, all member functions so the surface control pointer is `this`.
 type FnGetDefault = unsafe extern "C" fn() -> *mut c_void;
@@ -82,7 +82,7 @@ type FnCreateSurfaceChecked = unsafe extern "C" fn(
     *mut *mut c_void,  // sp<SurfaceControl>*
     i32,               // flags
     *const c_void,     // const sp<IBinder>& parent
-    *mut c_void,       // LayerMetadata (passed indirectly: non-trivial)
+    *const c_void,     // const gui::LayerMetadata&
     *mut u32,          // outTransformHint
 ) -> i32;
 type FnGetSurface = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
@@ -139,11 +139,12 @@ fn main() {
         return;
     };
 
-    // Android 15 libgui mangled names. createSurfaceChecked's metadata parameter
-    // is `gui::LayerMetadata`, a class with a non-trivial copy constructor, so the
-    // Itanium ABI passes it by invisible reference and Rust sees a plain pointer.
+    // Mangled names taken from this ROM's own /system/lib64/libgui.so, not from a
+    // header guess. Note that createSurfaceChecked here still takes
+    // `const gui::LayerMetadata&` (the pre-Android-15 signature), so the metadata
+    // object is only read and never moved from.
     const SYM_GET_DEFAULT: &[u8] = b"_ZN7android21SurfaceComposerClient10getDefaultEv\0";
-    const SYM_CREATE_CHECKED: &[u8] = b"_ZN7android21SurfaceComposerClient20createSurfaceCheckedERKNS_7String8EjjiPNS_2spINS_14SurfaceControlEEEiRKNS4_INS_7IBinderEEENS_3gui13LayerMetadataEPj\0";
+    const SYM_CREATE_CHECKED: &[u8] = b"_ZN7android21SurfaceComposerClient20createSurfaceCheckedERKNS_7String8EjjiPNS_2spINS_14SurfaceControlEEEiRKNS4_INS_7IBinderEEERKNS_3gui13LayerMetadataEPj\0";
     const SYM_GET_SURFACE: &[u8] = b"_ZN7android14SurfaceControl10getSurfaceEv\0";
     const SYM_STRING8_CTOR: &[u8] = b"_ZN7android7String8C1EPKc\0";
     const SYM_STRING8_CTOR2: &[u8] = b"_ZN7android7String8C2EPKc\0";
@@ -189,7 +190,7 @@ fn main() {
     }
     logging::info(&format!("layer-probe: client at {:#x}", client as usize));
 
-    let mut name = Blob([0u8; 1024]);
+    let mut name = Blob([0u8; 4096]);
     unsafe {
         string8_ctor(
             name.0.as_mut_ptr() as *mut c_void,
@@ -197,13 +198,13 @@ fn main() {
         )
     };
 
-    let mut metadata = Blob([0u8; 1024]);
+    let mut metadata = Blob([0u8; 4096]);
     unsafe { metadata_ctor(metadata.0.as_mut_ptr() as *mut c_void) };
 
     // `nullptr` cannot be used for the parent handle: the parameter is a
     // `const sp<IBinder>&` and SF copy-assigns from it, so it has to point at a
     // real, empty sp. A zeroed sp is an empty sp (its only member is the pointer).
-    let no_parent = Blob([0u8; 1024]);
+    let no_parent = Blob([0u8; 4096]);
 
     let mut control: *mut c_void = ptr::null_mut();
     let status = unsafe {
@@ -216,7 +217,7 @@ fn main() {
             &mut control as *mut *mut c_void,
             0,
             no_parent.0.as_ptr() as *const c_void,
-            metadata.0.as_mut_ptr() as *mut c_void,
+            metadata.0.as_ptr() as *const c_void,
             ptr::null_mut(),
         )
     };
@@ -244,7 +245,7 @@ fn main() {
         let set_position: FnTxSetPosition = unsafe { std::mem::transmute(set_position) };
         let apply: FnTxApply = unsafe { std::mem::transmute(apply) };
 
-        let mut tx = Blob([0u8; 1024]);
+        let mut tx = Blob([0u8; 4096]);
         unsafe {
             tx_ctor(tx.0.as_mut_ptr() as *mut c_void);
             set_layer(

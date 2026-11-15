@@ -96,7 +96,8 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="$GITHUB_REF_NAME"; else V="${GITHUB_SHA::8}"; fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           VERSION="$V" scripts/ci_package.sh \
-            target/aarch64-linux-android/release/face-hal-service dist
+            target/aarch64-linux-android/release/face-hal-service dist \
+            target/aarch64-linux-android/release/face-layer-probe
           ls -l dist
 
       - name: Upload ROM zip
@@ -112,6 +113,12 @@ jobs:
           name: face-hal-service-aarch64
           path: target/aarch64-linux-android/release/face-hal-service
 
+      - name: Upload preview probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: face-layer-probe-aarch64
+          path: target/aarch64-linux-android/release/face-layer-probe
+
       - name: Release
         if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
@@ -124,3 +131,4 @@ jobs:
           files: |
             dist/face-hal-rom-${{ steps.pkg.outputs.version }}.zip
             target/aarch64-linux-android/release/face-hal-service
+            target/aarch64-linux-android/release/face-layer-probe
