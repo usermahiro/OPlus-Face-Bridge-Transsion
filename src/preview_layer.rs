@@ -35,6 +35,9 @@ const RTLD_NOW: c_int = 2;
 const RTLD_GLOBAL: c_int = 0x100;
 
 const PIXEL_FORMAT_RGBA_8888: i32 = 1;
+/// Largest destination width the blitter accepts; also the size of its row
+/// tables. Matches the clamp on `persist.sys.facehal.preview.w`.
+const MAX_DST_W: usize = 1440;
 const GRALLOC_USAGE_SW_RW_OFTEN: u32 = 0x3;
 const NATIVE_WINDOW_API_CPU: i32 = 2;
 
@@ -262,6 +265,9 @@ pub struct PreviewLayer {
     surface: *mut c_void,
     width: i32,
     height: i32,
+    /// Circle mask: pixels outside the inscribed disc keep alpha 0, so only the
+    /// enrolment circle is painted and the UI behind the corners stays visible.
+    round: bool,
     frames: u32,
     last_post: Option<Instant>,
 }
@@ -271,7 +277,14 @@ pub struct PreviewLayer {
 unsafe impl Send for PreviewLayer {}
 
 impl PreviewLayer {
-    fn create(width: i32, height: i32, x: f32, y: f32, z: i32) -> Option<PreviewLayer> {
+    fn create(
+        width: i32,
+        height: i32,
+        x: f32,
+        y: f32,
+        z: i32,
+        round: bool,
+    ) -> Option<PreviewLayer> {
         let api = api()?;
         let client = unsafe { (api.get_default)() }.ptr();
         if client.is_null() {
@@ -336,8 +349,8 @@ impl PreviewLayer {
             let format = (api.set_format)(surface, PIXEL_FORMAT_RGBA_8888);
             let connected = (api.connect)(surface, NATIVE_WINDOW_API_CPU);
             logging::info(&format!(
-                "preview: layer ready {}x{} at ({}, {}) z={} dims={} format={} connect={}",
-                width, height, x, y, z, dims, format, connected
+                "preview: layer ready {}x{} at ({}, {}) z={} round={} dims={} format={} connect={}",
+                width, height, x, y, z, round, dims, format, connected
             ));
             if connected != 0 {
                 logging::error("preview: layer producer refused the CPU api");
@@ -351,6 +364,7 @@ impl PreviewLayer {
             surface,
             width,
             height,
+            round,
             frames: 0,
             last_post: None,
         })
@@ -406,6 +420,7 @@ impl PreviewLayer {
             nv21,
             width,
             height,
+            self.round,
         );
 
         unsafe {
@@ -465,6 +480,12 @@ impl Drop for PreviewLayer {
 /// The sensor is mounted rotated: a 640x480 frame is a portrait scene, so source
 /// columns map to destination rows. The image is mirrored, as a selfie preview
 /// should be; the algorithm keeps the unmirrored frame.
+///
+/// With `round` set, everything outside the disc inscribed in the destination
+/// rectangle keeps alpha 0. The layer is created without the opaque flag, so
+/// SurfaceFlinger blends it and the corners show what is behind it instead of a
+/// black square covering the enrolment UI.
+#[allow(clippy::too_many_arguments)]
 fn blit_nv21(
     dst: *mut u8,
     dst_w: i32,
@@ -473,6 +494,7 @@ fn blit_nv21(
     nv21: &[u8],
     width: i32,
     height: i32,
+    round: bool,
 ) {
     let y_plane = nv21;
     let vu_plane = &nv21[(width * height) as usize..];
@@ -491,30 +513,57 @@ fn blit_nv21(
     let denom_w = (dst_w - 1).max(1);
     let denom_h = (dst_h - 1).max(1);
 
-    let dst_w_usize = (dst_w as usize).min(1080);
-    let mut row_y_offs = [0usize; 1080];
-    let mut row_uv_offs = [0usize; 1080];
+    let dst_w_usize = (dst_w as usize).min(MAX_DST_W);
+    let mut row_y_offs = [0usize; MAX_DST_W];
+    let mut row_uv_offs = [0usize; MAX_DST_W];
+    let mut col_dx2 = [0.0f32; MAX_DST_W];
     for dx in 0..dst_w_usize {
         let px = crop_x0 + (dx as i32 * (crop_w - 1)) / denom_w;
         let s_row = px.clamp(0, height - 1) as usize;
         row_y_offs[dx] = s_row * width as usize;
         row_uv_offs[dx] = (s_row >> 1) * width as usize;
+        // Radially symmetric, so the mirrored column shares this value.
+        let off_centre = dx as f32 - (dst_w as f32 - 1.0) * 0.5;
+        col_dx2[dx] = off_centre * off_centre;
     }
+
+    let centre_y = (dst_h as f32 - 1.0) * 0.5;
+    let radius = dst_w.min(dst_h) as f32 * 0.5 - 1.0;
 
     for dy in 0..dst_h {
         let py = crop_y0 + (dy * (crop_h - 1)) / denom_h;
         let sensor_col = ((width - 1) - py).clamp(0, width - 1) as usize;
         let col_uv_base = (sensor_col >> 1) << 1;
         let dst_row = unsafe { dst.add(dy as usize * stride_bytes) as *mut u32 };
+        let off_centre = dy as f32 - centre_y;
+        let row_dy2 = off_centre * off_centre;
         for dx in 0..dst_w_usize {
             let y_val = y_plane[sensor_col + row_y_offs[dx]];
             let uv_idx = row_uv_offs[dx] + col_uv_base;
             let v_val = vu_plane[uv_idx];
             let u_val = vu_plane[uv_idx + 1];
             let (r, g, b) = yuv_to_rgb(y_val, u_val, v_val);
+            let alpha = if !round {
+                255u32
+            } else {
+                // One pixel of softening at the rim, otherwise the circle edge
+                // is a staircase in the middle of the enrolment ring.
+                let dist = (col_dx2[dx] + row_dy2).sqrt();
+                ((radius - dist + 0.5).clamp(0.0, 1.0) * 255.0) as u32
+            };
+            let pixel = if alpha == 0 {
+                0
+            } else if alpha == 255 {
+                0xFF00_0000 | ((b as u32) << 16) | ((g as u32) << 8) | r as u32
+            } else {
+                // Partly covered rim: premultiplied, as SurfaceFlinger expects.
+                let pr = (r as u32 * alpha) / 255;
+                let pg = (g as u32 * alpha) / 255;
+                let pb = (b as u32 * alpha) / 255;
+                (alpha << 24) | (pb << 16) | (pg << 8) | pr
+            };
             unsafe {
-                *dst_row.add(dst_w_usize - 1 - dx) =
-                    0xFF00_0000 | ((b as u32) << 16) | ((g as u32) << 8) | r as u32;
+                *dst_row.add(dst_w_usize - 1 - dx) = pixel;
             }
         }
     }
@@ -552,11 +601,16 @@ fn prop_f32(name: &[u8], default: f32) -> f32 {
 /// Geometry is settable so the layer can be lined up with the enrollment UI from
 /// the shell, without rebuilding:
 ///
-///   setprop persist.sys.facehal.preview.w 480
+///   setprop persist.sys.facehal.preview.w 640
 ///   setprop persist.sys.facehal.preview.h 640
-///   setprop persist.sys.facehal.preview.x 120
-///   setprop persist.sys.facehal.preview.y 360
+///   setprop persist.sys.facehal.preview.x 220
+///   setprop persist.sys.facehal.preview.y 880
 ///   setprop persist.sys.facehal.preview.z 1000000
+///   setprop persist.sys.facehal.preview.round 1
+///
+/// `round 1` paints an inscribed disc and leaves the corners transparent, so the
+/// box can be made as large as the enrolment circle without covering the UI
+/// around it.
 pub fn open_current() -> bool {
     let mut slot = match CURRENT.lock() {
         Ok(slot) => slot,
@@ -571,8 +625,9 @@ pub fn open_current() -> bool {
     let x = prop_f32(b"persist.sys.facehal.preview.x\0", 120.0);
     let y = prop_f32(b"persist.sys.facehal.preview.y\0", 360.0);
     let z = prop_i32(b"persist.sys.facehal.preview.z\0", 1_000_000);
+    let round = prop_i32(b"persist.sys.facehal.preview.round\0", 0) != 0;
 
-    match PreviewLayer::create(width, height, x, y, z) {
+    match PreviewLayer::create(width, height, x, y, z, round) {
         Some(layer) => {
             *slot = Some(layer);
             true

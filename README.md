@@ -244,15 +244,21 @@ Geometry is read from properties each time an enrollment starts, so it can be li
 app's preview circle without a rebuild:
 
 ```bash
-setprop persist.sys.facehal.preview.w 480   # layer width
+setprop persist.sys.facehal.preview.w 640   # layer width
 setprop persist.sys.facehal.preview.h 640   # layer height
-setprop persist.sys.facehal.preview.x 120   # left edge
-setprop persist.sys.facehal.preview.y 360   # top edge
+setprop persist.sys.facehal.preview.x 220   # left edge
+setprop persist.sys.facehal.preview.y 880   # top edge
 setprop persist.sys.facehal.preview.z 1000000   # z order, higher is on top
+setprop persist.sys.facehal.preview.round 1 # 1 = circular, 0 = plain rectangle
 ```
 
 The default z puts the layer above app windows. Lower it (for example `-1`) to sit behind the
 app so the preview only shows through the SurfaceView hole the app already has.
+
+`round 1` paints the disc inscribed in the rectangle and leaves everything outside it at alpha
+0. The layer is created without the opaque flag, so SurfaceFlinger blends it and the app's
+enrolment ring keeps showing around the preview. Without it the layer is a solid rectangle that
+covers the ring and the text under it.
 
 The same `dlsym` route as the probe is used, so a ROM with a different libgui logs the missing
 symbol instead of failing to start.
