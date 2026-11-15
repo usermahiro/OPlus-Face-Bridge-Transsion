@@ -39,30 +39,10 @@ const DISPLAY_SECONDS: u64 = 30;
 extern "C" {
     fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-
-    fn ANativeWindow_setBuffersGeometry(
-        window: *mut c_void,
-        width: i32,
-        height: i32,
-        format: i32,
-    ) -> i32;
-    fn ANativeWindow_lock(
-        window: *mut c_void,
-        buffer: *mut ANativeWindow_Buffer,
-        dirty_bounds: *mut c_void,
-    ) -> i32;
-    fn ANativeWindow_unlockAndPost(window: *mut c_void) -> i32;
 }
 
-#[repr(C)]
-struct ANativeWindow_Buffer {
-    width: i32,
-    height: i32,
-    stride: i32,
-    format: i32,
-    bits: *mut c_void,
-    reserved: [u32; 6],
-}
+/// GRALLOC_USAGE_SW_READ_OFTEN | GRALLOC_USAGE_SW_WRITE_OFTEN.
+const GRALLOC_USAGE_SW_RW_OFTEN: u32 = 0x3;
 
 /// Over-sized, over-aligned scratch space for a C++ object that is created by its
 /// own constructor. The real objects live inside libgui and their sizes are not
@@ -123,6 +103,12 @@ type FnTxSetLayer = unsafe extern "C" fn(*mut c_void, *const *mut c_void, i32) -
 type FnTxSetPosition =
     unsafe extern "C" fn(*mut c_void, *const *mut c_void, f32, f32) -> *mut c_void;
 type FnTxApply = unsafe extern "C" fn(*mut c_void, bool, bool) -> i32;
+type FnDequeue = unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut *mut c_void) -> i32;
+type FnGraphicBufferLock =
+    unsafe extern "C" fn(*mut c_void, u32, *mut *mut c_void, *mut i32, *mut i32) -> i32;
+type FnGraphicBufferUnlock = unsafe extern "C" fn(*mut c_void) -> i32;
+type FnQueue =
+    unsafe extern "C" fn(*mut c_void, *const *mut c_void, *const *mut c_void, *mut c_void) -> i32;
 
 fn dlopen_first(names: &[&[u8]]) -> Option<*mut c_void> {
     for name in names {
@@ -308,35 +294,75 @@ fn main() {
         surface as usize, WIDTH, HEIGHT
     ));
 
-    // Surface derives from ANativeWindow, so its pointer is the producer window.
-    let geom = unsafe { ANativeWindow_setBuffersGeometry(surface, WIDTH, HEIGHT, PIXEL_FORMAT_RGBA_8888) };
-    logging::info(&format!("layer-probe: setBuffersGeometry ret={}", geom));
+    // Draw through Surface's own producer API, not through the ANativeWindow C
+    // helpers. On this ROM ANativeWindow_setBuffersGeometry dispatches through a
+    // function-table slot that does not match the Surface it is handed, and the
+    // probe died in libgui's deprecated queueBuffer hook with a status_t where a
+    // buffer pointer belonged. Surface::dequeueBuffer/queueBuffer live in libgui
+    // itself, and GraphicBuffer::lock reports the stride directly.
+    let const_dequeue = b"_ZN7android7Surface13dequeueBufferEPNS_2spINS_13GraphicBufferEEEPNS1_INS_5FenceEEE\0";
+    let const_gb_lock = b"_ZN7android13GraphicBuffer4lockEjPPvPiS3_\0";
+    let const_gb_unlock = b"_ZN7android13GraphicBuffer6unlockEv\0";
+    let const_queue = b"_ZN7android7Surface11queueBufferERKNS_2spINS_13GraphicBufferEEERKNS1_INS_5FenceEEEPNS_24SurfaceQueueBufferOutputE\0";
 
-    let mut buffer = ANativeWindow_Buffer {
-        width: 0,
-        height: 0,
-        stride: 0,
-        format: 0,
-        bits: ptr::null_mut(),
-        reserved: [0; 6],
+    let (Some(dequeue), Some(gb_lock), Some(gb_unlock), Some(queue)) = (
+        resolve(gui, const_dequeue),
+        resolve(gui, const_gb_lock),
+        resolve(gui, const_gb_unlock),
+        resolve(gui, const_queue),
+    ) else {
+        logging::error("layer-probe: missing buffer entry points, nothing drawn");
+        return;
     };
-    let locked = unsafe { ANativeWindow_lock(surface, &mut buffer, ptr::null_mut()) };
+    let dequeue: FnDequeue = unsafe { std::mem::transmute(dequeue) };
+    let gb_lock: FnGraphicBufferLock = unsafe { std::mem::transmute(gb_lock) };
+    let gb_unlock: FnGraphicBufferUnlock = unsafe { std::mem::transmute(gb_unlock) };
+    let queue: FnQueue = unsafe { std::mem::transmute(queue) };
+
+    // Both out parameters are `sp<T>`: an eight-byte reference-counted pointer.
+    let mut buffer: *mut c_void = ptr::null_mut();
+    let mut fence: *mut c_void = ptr::null_mut();
+    let dequeued = unsafe { dequeue(surface, &mut buffer, &mut fence) };
     logging::info(&format!(
-        "layer-probe: lock ret={} {}x{} stride={} bits={:#x}",
-        locked,
-        buffer.width,
-        buffer.height,
-        buffer.stride,
-        buffer.bits as usize
+        "layer-probe: dequeueBuffer ret={} buffer={:#x} fence={:#x}",
+        dequeued, buffer as usize, fence as usize
     ));
-    if locked == 0 && !buffer.bits.is_null() {
-        // Opaque magenta: impossible to mistake for a black preview.
-        let stride = buffer.stride.max(buffer.width) as usize;
+    if dequeued != 0 || buffer.is_null() {
+        logging::error("layer-probe: Surface refused to hand out a buffer");
+        return;
+    }
+
+    let mut vaddr: *mut c_void = ptr::null_mut();
+    let mut bytes_per_pixel: i32 = 0;
+    let mut bytes_per_stride: i32 = 0;
+    let locked = unsafe {
+        gb_lock(
+            buffer,
+            GRALLOC_USAGE_SW_RW_OFTEN,
+            &mut vaddr,
+            &mut bytes_per_pixel,
+            &mut bytes_per_stride,
+        )
+    };
+    logging::info(&format!(
+        "layer-probe: GraphicBuffer::lock ret={} addr={:#x} bpp={} bytes_per_stride={}",
+        locked, vaddr as usize, bytes_per_pixel, bytes_per_stride
+    ));
+
+    if locked == 0 && !vaddr.is_null() {
+        // Opaque magenta: impossible to mistake for a black preview. A uniform
+        // fill means a wrong stride only skews nothing at all, it just leaves the
+        // row padding untouched.
+        let stride = if bytes_per_stride > 0 {
+            bytes_per_stride as usize
+        } else {
+            (WIDTH as usize) * 4
+        };
         unsafe {
-            let base = buffer.bits as *mut u8;
-            for y in 0..buffer.height as usize {
-                let row = base.add(y * stride * 4);
-                for x in 0..buffer.width as usize {
+            let base = vaddr as *mut u8;
+            for y in 0..HEIGHT as usize {
+                let row = base.add(y * stride);
+                for x in 0..WIDTH as usize {
                     let px = row.add(x * 4);
                     *px = 0xff;
                     *px.add(1) = 0x00;
@@ -345,8 +371,24 @@ fn main() {
                 }
             }
         }
-        let posted = unsafe { ANativeWindow_unlockAndPost(surface) };
-        logging::info(&format!("layer-probe: unlockAndPost ret={}", posted));
+        logging::info("layer-probe: buffer filled magenta");
+        let unlocked = unsafe { gb_unlock(buffer) };
+        logging::info(&format!("layer-probe: GraphicBuffer::unlock ret={}", unlocked));
+
+        // SurfaceQueueBufferOutput is a plain struct of counters; the probe never
+        // reads it back, it only has to be writable.
+        let mut output = Blob([0u8; 4096]);
+        let queued = unsafe {
+            queue(
+                surface,
+                &buffer as *const *mut c_void,
+                &fence as *const *mut c_void,
+                output.0.as_mut_ptr() as *mut c_void,
+            )
+        };
+        logging::info(&format!("layer-probe: queueBuffer ret={}", queued));
+    } else {
+        logging::error("layer-probe: could not map the graphics buffer");
     }
 
     logging::info(&format!(

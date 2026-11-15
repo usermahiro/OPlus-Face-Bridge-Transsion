@@ -201,8 +201,15 @@ The layer stays up for 30 seconds. Read the result in `logcat -s FaceHalHW`:
 - `missing symbol _ZN7android...` — libgui on this ROM does not export what the probe calls;
   the name in the log says which one, and a `strings libgui.so` check settles it.
 - `createSurfaceChecked ret=-1` or `-13` — SurfaceFlinger rejected the layer (permission).
-- `createSurfaceChecked ret=0` then `unlockAndPost ret=0` and a magenta rectangle — the layer
-  route is usable and the preview can be built on top of it.
+- `createSurfaceChecked ret=0`, `dequeueBuffer ret=0`, `GraphicBuffer::lock ret=0` and
+  `queueBuffer ret=0` plus a magenta rectangle — the layer route is usable and the preview can
+  be built on top of it.
+
+The probe never calls the `ANativeWindow_*` C helpers. On this ROM they dispatch through a
+function-table slot that does not line up with the `Surface` handed to them: the first attempt
+died in `Surface::hook_queueBuffer_DEPRECATED` with a `status_t` (`-7`) where a buffer pointer
+belonged. `Surface::dequeueBuffer`/`queueBuffer` and `GraphicBuffer::lock` are called through
+`dlsym` instead, so no helper sits between the probe and libgui.
 
 ## Credits
 
