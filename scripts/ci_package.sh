@@ -18,7 +18,6 @@ PKG="face-hal-rom-$VERSION"
 STAGE="$OUT/$PKG"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/vendor/bin/hw" "$STAGE/vendor/etc/init" "$STAGE/vendor/etc/vintf" "$STAGE/config"
-
 install -m 0755 "$BIN" "$STAGE/vendor/bin/hw/$HAL_NAME"
 
 # Optional diagnostic: never installed into /vendor, never started by init. It
@@ -111,6 +110,17 @@ XML
 ESC_NAME="${HAL_NAME//./\\.}"
 printf '/(vendor|system/vendor)/bin/hw/%s u:object_r:hal_face_default_exec:s0\n' "$ESC_NAME" \
     > "$STAGE/config/vendor_file_contexts.add"
+# The label of the copy init leaves for the HAL's own re-exec. This one goes into
+# the platform file_contexts: vendor_file_contexts may not label /data.
+{
+    printf '/data/local/tmp/facehal/%s u:object_r:hal_face_default_exec:s0\n' "$ESC_NAME"
+    printf '/data/local/tmp/facehal/%s\\.unrestr u:object_r:vendor_file:s0\n' "$ESC_NAME"
+} > "$STAGE/config/plat_file_contexts.add"
+
+# Same step, as init actions: the HAL re-executes itself from /data/local/tmp
+# because a vendor-class process cannot open libgui.so.
+sed -e "s|@HAL_NAME@|$HAL_NAME|g" \
+    "$HERE/rom/face-preview-prep.rc" > "$STAGE/vendor/etc/init/face-preview-prep.rc"
 
 cat > "$STAGE/names.env" <<NAMES
 HAL_NAME="$HAL_NAME"

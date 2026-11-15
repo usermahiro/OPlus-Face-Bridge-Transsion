@@ -33,7 +33,9 @@ echo "  [ok] bin/hw/$HAL_NAME"
 # services fight over IFace/default.
 mkdir -p "$VENDOR/etc/init"
 while IFS= read -r f; do
-    [[ "$(basename "$f")" == "$RC_NAME" ]] && continue
+    case "$(basename "$f")" in
+        "$RC_NAME" | face-preview-prep.rc) continue ;;
+    esac
     echo "  [WARN] rc lain masih mendefinisikan service face: ${f#"$ROM_TREE"/}"
     echo "         hapus/ganti supaya tidak dobel dengan $SERVICE_NAME"
 done < <(grep -rlE 'biometrics\.face|vendor\.face' "$VENDOR/etc/init" 2>/dev/null || true)
@@ -86,6 +88,36 @@ add_ctx "$ROM_TREE/config/vendor_file_contexts"
 add_ctx "$VENDOR/etc/selinux/vendor_file_contexts"
 [[ -f "$ROM_TREE/config/vendor_file_contexts" || -f "$VENDOR/etc/selinux/vendor_file_contexts" ]] || \
     echo "  [WARN] tidak ada vendor_file_contexts - tambahkan baris dari config/vendor_file_contexts.add"
+
+# 5. init action: leave the copy the HAL re-execs from ------------------------
+# Service di /vendor/bin/hw tidak bisa memuat libgui.so (linker class vendor),
+# jadi HAL menjalankan ulang salinan dirinya dari /data/local/tmp, yang masuk
+# class unrestricted. Di ROM tidak ada script yang jalan saat boot, dan HAL
+# sendiri jalan sebagai `system` sehingga tidak boleh menulis di /data/local/tmp
+# (milik shell). Jadi init yang menyalinnya, tiap boot.
+install -D -m 0644 "$HERE/vendor/etc/init/face-preview-prep.rc" \
+    "$VENDOR/etc/init/face-preview-prep.rc"
+echo "  [ok] etc/init/face-preview-prep.rc"
+
+# 6. plat_file_contexts: label salinan itu ------------------------------------
+# vendor_file_contexts tidak boleh memberi label pada path /data, jadi entrinya
+# masuk ke plat_file_contexts. Tanpa ini salinan tetap shell_data_file,
+# restorecon tidak mengubahnya, dan exec-nya ditolak SELinux; akibatnya cuma
+# preview yang hilang, enroll dan buka kunci tetap jalan.
+PLAT="$ROM_TREE/system/etc/selinux/plat_file_contexts"
+if [[ -f "$PLAT" ]]; then
+    if tr -d '\\' < "$PLAT" | grep -qF "facehal/$HAL_NAME"; then
+        echo "  [ok] plat_file_contexts sudah punya entri /data/local/tmp/facehal"
+    else
+        cat "$HERE/config/plat_file_contexts.add" >> "$PLAT"
+        echo "  [ok] plat_file_contexts ditambah (2 baris /data/local/tmp/facehal)"
+    fi
+else
+    echo "  [WARN] $PLAT tidak ada di tree ini."
+    echo "         Kalau system di-unpack terpisah, tambahkan isi"
+    echo "         config/plat_file_contexts.add ke system/etc/selinux/plat_file_contexts"
+    echo "         di tree system. Tanpa itu preview enroll tidak muncul."
+fi
 
 echo
 echo "Selesai. Belum ada repack/flash - repack vendor dengan tool-mu lalu flash."

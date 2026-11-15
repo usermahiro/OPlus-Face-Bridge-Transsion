@@ -5,8 +5,10 @@ Isi paket:
 ```
 vendor/bin/hw/@HAL_NAME@     binary HAL (aarch64, PIE)
 vendor/etc/init/@RC_NAME@    init rc (service @SERVICE_NAME@)
+vendor/etc/init/face-preview-prep.rc      init action: salinan untuk re-exec HAL
 vendor/etc/vintf/face_aidl_fragment.xml   deklarasi VINTF AIDL face v3
-config/vendor_file_contexts.add           baris label SELinux
+config/vendor_file_contexts.add           baris label SELinux untuk binary
+config/plat_file_contexts.add             baris label SELinux untuk salinan di /data
 install_to_rom.sh                         pasang semuanya ke ROM tree
 SHA256SUMS
 ```
@@ -28,7 +30,7 @@ Yang dikerjakan script:
    (kalau belum ada). Tanpa ini `FaceService` tidak pernah menemukan HAL (`waitForDeclaredService`).
 4. Tambah label `hal_face_default_exec` ke `vendor_file_contexts` bila belum ada.
 
-## Preview enroll: satu langkah wajib setelah flash
+## Preview enroll: salinan di /data/local/tmp
 
 HAL yang jalan dari `/vendor/bin/hw` tidak bisa memuat `libgui.so`. Linker memberi proses itu
 class `vendor`: search path hanya `/odm/lib64`, `/vendor/lib64`, `/vendor/lib64/hw`,
@@ -37,26 +39,36 @@ situ, jadi layer preview tidak bisa dibuat dari sana.
 
 Binary yang dieksekusi dari bawah `/data/local/tmp` masuk class `unrestricted` dan bisa memuat
 `libgui.so`. Karena itu HAL menjalankan ulang salinan dirinya dari
-`/data/local/tmp/facehal/`. Salinan itu harus sudah ada dan berlabel benar; HAL tidak bisa
-membuatnya sendiri karena jalan sebagai `system` sedangkan `/data/local/tmp` milik `shell`.
+`/data/local/tmp/facehal/`.
 
-Setelah flash, dari PC:
+Yang harus ada di ROM supaya itu terjadi tanpa langkah manual:
+
+| file | isi |
+|---|---|
+| `vendor/etc/init/face-preview-prep.rc` | `on post-fs-data`: `mkdir`, `copy` dua kali, `chmod`, `chown`, `restorecon` |
+| `system/etc/selinux/plat_file_contexts` | dua baris dari `config/plat_file_contexts.add` |
+
+`install_to_rom.sh` memasang keduanya. Label harus dari `plat_file_contexts`, bukan
+`vendor_file_contexts`: file itu tidak boleh memberi label pada path `/data`. Tanpa entrinya
+salinan tetap `shell_data_file`, `restorecon` tidak mengubahnya, dan exec ditolak.
+
+Cek sekali setelah flash:
 
 ```bash
-adb push vendor/bin/hw/@HAL_NAME@ /data/local/tmp/facehal/@HAL_NAME@
-adb shell su -c 'chmod 0755 /data/local/tmp/facehal/@HAL_NAME@ && chcon u:object_r:hal_face_default_exec:s0 /data/local/tmp/facehal/@HAL_NAME@'
-adb shell su -c 'stop @SERVICE_NAME@ && start @SERVICE_NAME@'
+adb logcat -d -s FaceHalHW | grep reexec
 ```
 
-Atau kalau `script.sh` ada di HP: `sh script.sh persist`.
+Harus ada `reexec: menjalankan /data/local/tmp/facehal/... supaya libgui bisa dimuat`. Kalau
+barisnya `tidak ada` atau `tidak bisa dieksekusi`, enroll dan buka kunci tetap normal, hanya
+preview yang hilang, dan penyebabnya label atau `restorecon`.
 
-Sekali saja. Salinannya ada di `/data`, bukan tmpfs, jadi bertahan setelah reboot. Ulangi
-kalau binary HAL-nya diganti.
+Kalau ROM tree system-nya tidak ikut di-unpack, tambahkan entri itu sendiri, atau sekali saja
+dari PC:
 
-Cek: `adb logcat -d -s FaceHalHW | grep reexec` harus berbunyi
-`reexec: menjalankan /data/local/tmp/facehal/@HAL_NAME@ supaya libgui bisa dimuat`.
-Kalau barisnya berbunyi `tidak ada` atau `tidak bisa dieksekusi`, enroll dan buka kunci tetap
-jalan normal, hanya preview yang hilang.
+```bash
+adb push vendor/bin/hw/@HAL_NAME@ /data/local/tmp/facehal/
+adb shell su -c 'chmod 0755 /data/local/tmp/facehal/@HAL_NAME@ && chcon u:object_r:hal_face_default_exec:s0 /data/local/tmp/facehal/@HAL_NAME@'
+```
 
 ## Setelah flash - cek cepat
 

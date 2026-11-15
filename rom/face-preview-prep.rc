@@ -1,0 +1,25 @@
+# Leaves the copy the face HAL re-executes itself from.
+#
+# The HAL started from /vendor/bin/hw is in the linker class "vendor" and cannot
+# load libgui.so, which only exists in /system/lib64. The same binary executed
+# from under /data/local/tmp is in the class "unrestricted" and can. A ROM has
+# nothing running script.sh at boot, and the HAL itself runs as `system`, which
+# cannot write under /data/local/tmp (owned by shell), so init puts the copy
+# there.
+#
+# The label is the part that needs help: a file created here would be
+# shell_data_file and every exec of it would be denied. restorecon applies the
+# entry that install_to_rom.sh appends to plat_file_contexts.
+#
+# post-fs-data, not late_start: the HAL starts in late_start and would race this
+# action otherwise.
+on post-fs-data
+    mkdir /data/local/tmp/facehal 0775 system system
+    copy /vendor/bin/hw/@HAL_NAME@ /data/local/tmp/facehal/@HAL_NAME@
+    chmod 0755 /data/local/tmp/facehal/@HAL_NAME@
+    chown system system /data/local/tmp/facehal/@HAL_NAME@
+    restorecon /data/local/tmp/facehal/@HAL_NAME@
+    copy /vendor/bin/hw/@HAL_NAME@ /data/local/tmp/facehal/@HAL_NAME@.unrestr
+    chmod 0755 /data/local/tmp/facehal/@HAL_NAME@.unrestr
+    chown system system /data/local/tmp/facehal/@HAL_NAME@.unrestr
+    restorecon /data/local/tmp/facehal/@HAL_NAME@.unrestr
