@@ -36,7 +36,11 @@ say() { echo "[script] $*"; }
 #
 # The running HAL has the binary mapped, so umount answers EBUSY until the
 # service is stopped. Stop first, then unmount.
-if grep -q " $DST " /proc/mounts; then
+#
+# `persist` writes the copy for the HAL's own re-exec and never touches /vendor,
+# so the mount is left alone: on a device that is still using the bind mount it
+# would otherwise fall back to the stock binary.
+if [ "$MODE" != "persist" ] && grep -q " $DST " /proc/mounts; then
     say "ada mount lama di $DST, stop HAL lalu unmount"
     stop "$SERVICE_NAME" 2>/dev/null || true
     sleep 1
