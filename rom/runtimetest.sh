@@ -29,9 +29,17 @@ say() { echo "[script] $*"; }
 
 # A leftover bind mount stacks: umount always wins over mount, and two entries
 # on the same target leave the older file in place. Clear it first.
+#
+# The running HAL has the binary mapped, so umount answers EBUSY until the
+# service is stopped. Stop first, then unmount.
 if grep -q " $DST " /proc/mounts; then
-    say "ada mount lama di $DST, unmount dulu"
-    umount "$DST" || { say "umount gagal, reboot lalu ulangi"; exit 1; }
+    say "ada mount lama di $DST, stop HAL lalu unmount"
+    stop "$SERVICE_NAME" 2>/dev/null || true
+    sleep 1
+    umount "$DST" || {
+        say "umount masih gagal (EBUSY), proses HAL belum mati: reboot lalu ulangi"
+        exit 1
+    }
 fi
 
 if [ "$MODE" = "unmount" ]; then
@@ -58,6 +66,18 @@ chmod 0755 "$MNT/$HAL_NAME"
 # vendor exec label. On /data it is shell_data_file and the exec would be denied.
 chcon u:object_r:hal_face_default_exec:s0 "$MNT/$HAL_NAME" 2>/dev/null \
     || say "peringatan: chcon gagal, exec bisa ditolak SELinux"
+
+# Second copy for the HAL's own re-exec. The HAL is started from /vendor/bin/hw,
+# a linker class that cannot open libgui.so, so it re-executes itself from under
+# /data/local/tmp where the "unrestricted" class applies. That copy must not
+# replace the one above: init needs this inode to stay hal_face_default_exec as
+# its entrypoint. vendor_file is tried because a domain is not always allowed to
+# execute its own entrypoint type directly.
+if cp -f "$SRC" "$MNT/$HAL_NAME.unrestr" 2>/dev/null; then
+    chmod 0755 "$MNT/$HAL_NAME.unrestr"
+    chcon u:object_r:vendor_file:s0 "$MNT/$HAL_NAME.unrestr" 2>/dev/null \
+        || say "peringatan: chcon vendor_file gagal pada $HAL_NAME.unrestr"
+fi
 
 mount --bind "$MNT/$HAL_NAME" "$DST" || { say "mount --bind gagal"; exit 1; }
 grep -q " $DST " /proc/mounts || { say "mount tidak terlihat di /proc/mounts"; exit 1; }

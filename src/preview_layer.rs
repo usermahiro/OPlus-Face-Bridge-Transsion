@@ -45,6 +45,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 extern "C" {
     fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlerror() -> *mut c_char;
 }
 
 /// Result slot for a function returning `sp<T>` by value: the callee writes the
@@ -183,20 +184,45 @@ fn resolve(handle: *mut c_void, name: &[u8]) -> Option<*mut c_void> {
 }
 
 fn load_api() -> Option<Api> {
-    let gui = [
-        b"libgui.so\0".as_slice(),
-        b"/system/lib64/libgui.so\0".as_slice(),
-    ]
-    .iter()
-    .filter_map(|name| {
+    // A vendor process (this HAL) runs in an isolated linker namespace: the
+    // system-only libgui may simply not be reachable. dlopen then fails without
+    // printing anything of ours, which looks exactly like "nothing happened", so
+    // the reason is logged here instead of being swallowed.
+    let candidates: [&[u8]; 4] = [
+        b"libgui.so\0",
+        b"/system/lib64/libgui.so\0",
+        b"/vendor/lib64/libgui.so\0",
+        b"/vendor/lib64/hw/libgui.so\0",
+    ];
+    let mut gui: *mut c_void = ptr::null_mut();
+    for name in candidates {
         let handle = unsafe { dlopen(name.as_ptr() as *const c_char, RTLD_NOW | RTLD_GLOBAL) };
-        if handle.is_null() {
-            None
-        } else {
-            Some(handle)
+        if !handle.is_null() {
+            logging::info(&format!(
+                "preview: loaded {}",
+                String::from_utf8_lossy(&name[..name.len() - 1])
+            ));
+            gui = handle;
+            break;
         }
-    })
-    .next()?;
+        let err = unsafe { dlerror() };
+        let detail = if err.is_null() {
+            "no dlerror detail".to_string()
+        } else {
+            unsafe { std::ffi::CStr::from_ptr(err) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        logging::error(&format!(
+            "preview: dlopen({}) failed: {}",
+            String::from_utf8_lossy(&name[..name.len() - 1]),
+            detail
+        ));
+    }
+    if gui.is_null() {
+        logging::error("preview: libgui is unreachable from this process, no layer");
+        return None;
+    }
 
     unsafe {
         Some(Api {

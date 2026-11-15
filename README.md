@@ -218,6 +218,28 @@ layer named `FaceHalEnrollPreview`, connects as a CPU producer and blits every c
 it: NV21 to RGBA, sensor rotation applied, image mirrored like a selfie preview. The layer is
 detached when the enrollment ends.
 
+#### Why the HAL re-executes itself
+
+`libgui.so` exists only in `/system/lib64`, and this ROM's linker configuration gives a process
+started from `/vendor/bin/hw` the `vendor` class: search paths are `/odm/lib64`, `/vendor/lib64`,
+`/vendor/lib64/hw` and `/vendor/lib64/egl`, permitted paths are `/odm`, `/vendor` and
+`/system/vendor`, and system libraries are reachable only through the fixed LLNDK allowlist in
+`namespace.default.link.system.shared_libs`. `libgui.so` is on none of those lists, so a vendor
+process cannot open it: not by name, not by absolute path, and not after preloading its
+dependencies.
+
+The same binary executed from under `/data/local/tmp` is placed in the `unrestricted` class by
+the `dir.unrestricted` rule in the same file, and that class can load system libraries. That is
+why the layer probe works from a shell. So `main()` re-executes the copy that `script.sh` already
+writes to `/data/local/tmp/facemnt/` for the bind mount, and that child does the real work in the
+unrestricted class. The vendor-class parent waits for it, which keeps init's supervision, the
+service's process group and the service registration intact.
+
+If the exec is refused (SELinux), the HAL logs it and keeps running from the vendor path:
+enrollment, authentication and the algorithm are unaffected, only the layer preview is missing.
+Look for `reexec: ...` in `logcat -s FaceHalHW` to tell which case happened.
+
+
 Geometry is read from properties each time an enrollment starts, so it can be lined up with the
 app's preview circle without a rebuild:
 
