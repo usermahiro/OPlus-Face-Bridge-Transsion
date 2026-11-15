@@ -6,6 +6,7 @@
 #
 #   su -c 'sh script.sh'           mount + restart
 #   su -c 'sh script.sh unmount'   drop the mount, back to the stock binary
+#   su -c 'sh script.sh persist'   keep a labeled copy on /data for a ROM install
 #
 # The binary is taken from vendor/bin/hw/ next to this script, so extract the
 # zip first and run the script from that folder.
@@ -19,6 +20,9 @@ DST="/vendor/bin/hw/$HAL_NAME"
 # execute_no_trans and dies without logging anything. A tmpfs mounted without
 # nosuid does not have that problem.
 MNT="${MNT:-/data/local/tmp/facemnt}"
+# Persistent copy for a ROM install, where nothing runs this script at boot.
+# Plain directory on /data: it survives a reboot, unlike the tmpfs above.
+PMNT="${PMNT:-/data/local/tmp/facehal}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC="$HERE/vendor/bin/hw/$HAL_NAME"
 MODE="${1:-mount}"
@@ -52,6 +56,35 @@ if [ "$MODE" = "unmount" ]; then
 fi
 
 [ -f "$SRC" ] || { say "binary tidak ada: $SRC"; say "extract zip dulu, jalankan dari folder hasil extract"; exit 1; }
+
+# --- persist: the copy a ROM install needs -------------------------------
+# A ROM has no script at boot, and the HAL cannot create this itself: it runs as
+# `system`, and /data/local/tmp belongs to shell. So the copy is written once,
+# here, into a plain directory on /data instead of the tmpfs. The label has to be
+# set at the same time, which is the other thing only root can do.
+#
+# The exec that matters is the HAL re-executing itself, not init: same domain, so
+# the nosuid mount under /data does not block it. That is the assumption this
+# mode rests on; the log after a reboot says whether it held.
+if [ "$MODE" = "persist" ]; then
+    mkdir -p "$PMNT" || { say "tidak bisa membuat $PMNT"; exit 1; }
+    cp -f "$SRC" "$PMNT/$HAL_NAME" || { say "salin gagal ke $PMNT"; exit 1; }
+    chmod 0755 "$PMNT/$HAL_NAME"
+    chcon u:object_r:hal_face_default_exec:s0 "$PMNT/$HAL_NAME" 2>/dev/null \
+        || say "peringatan: chcon gagal pada $PMNT/$HAL_NAME"
+    cp -f "$SRC" "$PMNT/$HAL_NAME.unrestr" 2>/dev/null && {
+        chmod 0755 "$PMNT/$HAL_NAME.unrestr"
+        chcon u:object_r:vendor_file:s0 "$PMNT/$HAL_NAME.unrestr" 2>/dev/null || true
+    }
+    say "salinan tetap: $PMNT/$HAL_NAME ($(ls -ln "$PMNT/$HAL_NAME" | awk '{print $1, $3, $4}'))"
+    stop "$SERVICE_NAME" 2>/dev/null || true
+    start "$SERVICE_NAME" 2>/dev/null || true
+    sleep 2
+    say "status: $(getprop "init.svc.$SERVICE_NAME")"
+    say "cek setelah reboot: enroll harus tetap menampilkan preview"
+    logcat -d -s FaceHalHW | grep -E "reexec" | tail -n 3
+    exit 0
+fi
 
 # The copy that init actually runs lives on tmpfs, not on /data.
 mkdir -p "$MNT"

@@ -58,11 +58,22 @@ fn reexec_from_unrestricted() {
         return;
     };
     let candidate = format!("/data/local/tmp/facemnt/{name}");
-    // Two names are tried: script.sh leaves the plain copy for the bind mount
-    // (labeled hal_face_default_exec, which init needs as an entrypoint) and a
-    // second copy with a `.unrestr` suffix labeled vendor_file in case this
-    // domain is not allowed to execute its own entrypoint type.
-    let candidates = [candidate.clone(), format!("{candidate}.unrestr")];
+    // Two names per directory. script.sh leaves the plain copy (labeled
+    // hal_face_default_exec, which init needs as an entrypoint) and a second copy
+    // with a `.unrestr` suffix labeled vendor_file in case this domain is not
+    // allowed to execute its own entrypoint type.
+    //
+    // Two directories: the tmpfs one that the runtime script mounts, and a plain
+    // directory on /data that survives a reboot. A ROM install cannot run the
+    // script at boot, so it uses the second one: `script.sh persist` puts a labeled
+    // copy there once and the service finds it on every later boot.
+    let candidates: Vec<String> = ["/data/local/tmp/facemnt", "/data/local/tmp/facehal"]
+        .iter()
+        .flat_map(|dir| {
+            let plain = format!("{dir}/{name}");
+            [plain.clone(), format!("{plain}.unrestr")]
+        })
+        .collect();
     let Some(target) = candidates
         .iter()
         .find(|p| std::path::Path::new(p).exists())
