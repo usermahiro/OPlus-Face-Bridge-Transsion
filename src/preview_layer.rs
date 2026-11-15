@@ -301,6 +301,9 @@ pub struct PreviewLayer {
     /// Circle mask: pixels outside the inscribed disc keep alpha 0, so only the
     /// enrolment circle is painted and the UI behind the corners stays visible.
     round: bool,
+    /// No frame is handed to SurfaceFlinger before this instant, which keeps the
+    /// layer empty (and invisible) while the app plays its own open animation.
+    opens_at: Instant,
     frames: u32,
     last_post: Option<Instant>,
 }
@@ -454,6 +457,7 @@ impl PreviewLayer {
             // The clip already removed the corners; masking them again would only
             // soften the rim twice.
             round: round && !clipped,
+            opens_at: Instant::now(),
             frames: 0,
             last_post: None,
         })
@@ -461,6 +465,11 @@ impl PreviewLayer {
 
     fn render_nv21(&mut self, nv21: &[u8], width: i32, height: i32) {
         if width <= 0 || height <= 0 || nv21.len() < (width * height * 3 / 2) as usize {
+            return;
+        }
+        // Frames before this instant are dropped, which keeps the layer empty and
+        // therefore invisible: the app gets its animation on screen first.
+        if Instant::now() < self.opens_at {
             return;
         }
         if let Some(last) = self.last_post {
@@ -690,18 +699,22 @@ fn prop_f32(name: &[u8], default: f32) -> f32 {
 /// Geometry is settable so the layer can be lined up with the enrollment UI from
 /// the shell, without rebuilding:
 ///
-///   setprop persist.sys.facehal.preview.w 640
-///   setprop persist.sys.facehal.preview.h 640
-///   setprop persist.sys.facehal.preview.x 220
-///   setprop persist.sys.facehal.preview.y 880
+///   setprop persist.sys.facehal.preview.w 872
+///   setprop persist.sys.facehal.preview.h 872
+///   setprop persist.sys.facehal.preview.x 104
+///   setprop persist.sys.facehal.preview.y 404
 ///   setprop persist.sys.facehal.preview.z 1000000
 ///   setprop persist.sys.facehal.preview.round 1
 ///   setprop persist.sys.facehal.preview.clip 0
+///   setprop persist.sys.facehal.preview.delay_ms 3000
 ///
 /// `round 1` asks for a circle. `clip` picks how: 0 masks the corners in the
 /// buffer (and clears the layer's opaque flag so they blend), 1 uses the AOSP
 /// corner radius, 2 uses OnePlus' setCornerRadiusExt with `corner_type` as its
 /// undocumented int. Whichever the ROM honours is the one to keep.
+///
+/// `delay_ms` holds the first frame back, so the layer stays empty while the app
+/// plays its own open animation. 0 shows the preview immediately.
 pub fn open_current() -> bool {
     let mut slot = match CURRENT.lock() {
         Ok(slot) => slot,
@@ -711,17 +724,25 @@ pub fn open_current() -> bool {
         return true;
     }
 
-    let width = prop_i32(b"persist.sys.facehal.preview.w\0", 480).clamp(64, 1440);
-    let height = prop_i32(b"persist.sys.facehal.preview.h\0", 640).clamp(64, 2560);
-    let x = prop_f32(b"persist.sys.facehal.preview.x\0", 120.0);
-    let y = prop_f32(b"persist.sys.facehal.preview.y\0", 360.0);
+    let width = prop_i32(b"persist.sys.facehal.preview.w\0", 872).clamp(64, 1440);
+    let height = prop_i32(b"persist.sys.facehal.preview.h\0", 872).clamp(64, 2560);
+    let x = prop_f32(b"persist.sys.facehal.preview.x\0", 104.0);
+    let y = prop_f32(b"persist.sys.facehal.preview.y\0", 404.0);
     let z = prop_i32(b"persist.sys.facehal.preview.z\0", 1_000_000);
-    let round = prop_i32(b"persist.sys.facehal.preview.round\0", 0) != 0;
+    let round = prop_i32(b"persist.sys.facehal.preview.round\0", 1) != 0;
     let clip = prop_i32(b"persist.sys.facehal.preview.clip\0", 0);
     let corner_type = prop_i32(b"persist.sys.facehal.preview.corner_type\0", 15);
+    let delay_ms = prop_i32(b"persist.sys.facehal.preview.delay_ms\0", 3000).clamp(0, 10_000);
 
     match PreviewLayer::create(width, height, x, y, z, round, clip, corner_type) {
-        Some(layer) => {
+        Some(mut layer) => {
+            // The layer exists but has no buffer yet; SurfaceFlinger shows nothing
+            // for it, which is exactly the gap the app's animation needs.
+            layer.opens_at = Instant::now() + Duration::from_millis(delay_ms as u64);
+            logging::info(&format!(
+                "preview: first frame held back for {} ms",
+                delay_ms
+            ));
             *slot = Some(layer);
             true
         }

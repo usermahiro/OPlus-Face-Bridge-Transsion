@@ -244,28 +244,34 @@ Geometry is read from properties each time an enrollment starts, so it can be li
 app's preview circle without a rebuild:
 
 ```bash
-setprop persist.sys.facehal.preview.w 640   # layer width
-setprop persist.sys.facehal.preview.h 640   # layer height
-setprop persist.sys.facehal.preview.x 220   # left edge
-setprop persist.sys.facehal.preview.y 880   # top edge
+setprop persist.sys.facehal.preview.w 872   # layer width
+setprop persist.sys.facehal.preview.h 872   # layer height
+setprop persist.sys.facehal.preview.x 104   # left edge
+setprop persist.sys.facehal.preview.y 404   # top edge
 setprop persist.sys.facehal.preview.z 1000000   # z order, higher is on top
 setprop persist.sys.facehal.preview.round 1 # 1 = circular, 0 = plain rectangle
 setprop persist.sys.facehal.preview.clip 0  # 0 = mask, 1 = corner radius, 2 = OnePlus ext
+setprop persist.sys.facehal.preview.delay_ms 3000   # hold the first frame back
 ```
+
+These are also the defaults in the code, tuned on a 1080x2400 panel.
 
 The default z puts the layer above app windows. Lower it (for example `-1`) to sit behind the
 app so the preview only shows through the SurfaceView hole the app already has.
 
 `round 1` makes the layer circular. Three mechanisms, picked with `persist.sys.facehal.preview.clip`:
-
 - `0` masks the disc in the buffer and clears the layer's opaque flag so the corners blend.
 - `1` calls the AOSP `SurfaceControl::Transaction::setCornerRadius` at half the short side.
 - `2` calls OnePlus' `setCornerRadiusExt(radius, radius, corner_type)`, whose last argument is
   undocumented; `corner_type` defaults to 15 (all four corners).
 
 `1` was tried first here and changed nothing: this ROM's SurfaceFlinger ignores the stock corner
-radius on a buffer layer. Use whichever the log and the screen agree on. Without `round` the
-layer is a solid rectangle that covers the ring and the text under it.
+radius on a buffer layer. `0` is what works here. Without `round` the layer is a solid rectangle
+that covers the ring and the text under it.
+
+`delay_ms` creates the layer right away but drops every camera frame until the delay ends, so
+SurfaceFlinger has no buffer to show and the app's own open animation runs on an empty circle.
+The first frame after the delay is logged as usual.
 
 The same `dlsym` route as the probe is used, so a ROM with a different libgui logs the missing
 symbol instead of failing to start.
