@@ -28,6 +28,7 @@ use crate::bindings::android::hardware::common::NativeHandle::NativeHandle;
 use crate::camera::{CameraEngine, CAPTURE_HEIGHT, CAPTURE_WIDTH};
 use crate::logging::{self, get_prop};
 use crate::stface::{EnrollOutcome, StFace, CAMERA_CHOOSE_PATH};
+use crate::preview_layer;
 use crate::surface_bridge;
 
 /// The algorithm library is process-global; both sessions and the service entry
@@ -257,6 +258,7 @@ impl ISession for FaceSession {
 
             close_camera();
             surface_bridge::clear();
+            preview_layer::close_current();
 
             {
                 let guard = algo.lock().unwrap();
@@ -275,14 +277,23 @@ impl ISession for FaceSession {
                         logging::info("session: preview surface attached");
                         surface_bridge::install(bridge);
                     }
-                    None => logging::error("session: could not decode the preview surface token"),
+                    None => {
+                        logging::error("session: could not decode the preview surface token");
+                        // The framework handed over a surface it could not wrap, so
+                        // the HAL draws the preview into a layer of its own.
+                        preview_layer::open_current();
+                    }
                 }
+            } else {
+                logging::info("session: no preview surface offered, drawing into the HAL's own layer");
+                preview_layer::open_current();
             }
 
             let mut cam = CameraEngine::new();
             if !cam.open(&camera_id()) {
                 logging::error("session: enroll could not open camera");
                 surface_bridge::clear();
+                preview_layer::close_current();
                 let _ = cb.onError(FaceError::TIMEOUT, 0);
                 return;
             }
@@ -308,6 +319,7 @@ impl ISession for FaceSession {
                         };
                         // Render every camera frame immediately without blocking on algorithm calls.
                         surface_bridge::render_current(frame, w, h);
+                        preview_layer::render_current(frame, w, h);
 
                         if let Ok(mut slot) = lf_cb.lock() {
                             *slot = Some((frame.to_vec(), w, h, stride));
@@ -322,6 +334,7 @@ impl ISession for FaceSession {
                 logging::error("session: enroll capture did not start");
                 close_camera();
                 surface_bridge::clear();
+                preview_layer::close_current();
                 let _ = cb.onError(FaceError::TIMEOUT, 0);
                 return;
             }
@@ -445,6 +458,7 @@ impl ISession for FaceSession {
             cancel_flag.store(true, Ordering::SeqCst);
             close_camera();
             surface_bridge::clear();
+            preview_layer::close_current();
         });
 
         Ok(BnCancellationSignal::new_binder(CancellationSignal {
@@ -712,6 +726,7 @@ impl ISession for FaceSession {
         let _session_guard = SESSION_LOCK.lock().unwrap();
         close_camera();
         surface_bridge::clear();
+        preview_layer::close_current();
         drop(_session_guard);
         self.callback.onSessionClosed()?;
         Ok(())

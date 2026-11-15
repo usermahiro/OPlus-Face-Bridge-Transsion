@@ -180,7 +180,6 @@ The framework puts a credential prompt in front of the enrollment page, so the p
 to be unlocked first.
 
 ### Preview probe
-
 `face-layer-probe` answers one question the HAL cannot answer by reading its input: on this
 ROM `system_server` has no `android.hidl.token@1.0::ITokenManager`, so `enroll` arrives with
 `fd=0 ints=[0]` and there is no surface to draw into. The probe bypasses the token entirely
@@ -210,6 +209,31 @@ function-table slot that does not line up with the `Surface` handed to them: the
 died in `Surface::hook_queueBuffer_DEPRECATED` with a `status_t` (`-7`) where a buffer pointer
 belonged. `Surface::dequeueBuffer`/`queueBuffer` and `GraphicBuffer::lock` are called through
 `dlsym` instead, so no helper sits between the probe and libgui.
+
+### Enrollment preview
+
+The HAL no longer needs the framework's surface to show a preview. When `enroll` arrives with
+an empty token (`fd=0 ints=[0]`, the normal case here) the HAL creates its own SurfaceFlinger
+layer named `FaceHalEnrollPreview`, connects as a CPU producer and blits every camera frame into
+it: NV21 to RGBA, sensor rotation applied, image mirrored like a selfie preview. The layer is
+detached when the enrollment ends.
+
+Geometry is read from properties each time an enrollment starts, so it can be lined up with the
+app's preview circle without a rebuild:
+
+```bash
+setprop persist.sys.facehal.preview.w 480   # layer width
+setprop persist.sys.facehal.preview.h 640   # layer height
+setprop persist.sys.facehal.preview.x 120   # left edge
+setprop persist.sys.facehal.preview.y 360   # top edge
+setprop persist.sys.facehal.preview.z 1000000   # z order, higher is on top
+```
+
+The default z puts the layer above app windows. Lower it (for example `-1`) to sit behind the
+app so the preview only shows through the SurfaceView hole the app already has.
+
+The same `dlsym` route as the probe is used, so a ROM with a different libgui logs the missing
+symbol instead of failing to start.
 
 ## Credits
 

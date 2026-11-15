@@ -12,6 +12,7 @@ mod bindings;
 mod camera;
 mod face;
 mod logging;
+mod preview_layer;
 mod session;
 mod stface;
 mod surface_bridge;
