@@ -255,10 +255,12 @@ setprop persist.sys.facehal.preview.round 1 # 1 = circular, 0 = plain rectangle
 The default z puts the layer above app windows. Lower it (for example `-1`) to sit behind the
 app so the preview only shows through the SurfaceView hole the app already has.
 
-`round 1` paints the disc inscribed in the rectangle and leaves everything outside it at alpha
-0. The layer is created without the opaque flag, so SurfaceFlinger blends it and the app's
-enrolment ring keeps showing around the preview. Without it the layer is a solid rectangle that
-covers the ring and the text under it.
+`round 1` makes the layer circular. Two mechanisms, whichever the ROM supports: first
+`SurfaceControl::Transaction::setCornerRadius` at half the short side, which asks
+SurfaceFlinger to clip the layer itself, so the corners are see-through regardless of how the
+buffer is treated; if libgui does not export that, the blitter masks the disc and leaves the
+corners at alpha 0 instead. Without it the layer is a solid rectangle that covers the ring and
+the text under it.
 
 The same `dlsym` route as the probe is used, so a ROM with a different libgui logs the missing
 symbol instead of failing to start.

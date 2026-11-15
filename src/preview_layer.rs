@@ -114,6 +114,7 @@ type FnReparent = unsafe extern "C" fn(
 ) -> *mut c_void;
 type FnApply = unsafe extern "C" fn(*mut c_void, bool, bool) -> i32;
 type FnSetFlags = unsafe extern "C" fn(*mut c_void, *const *mut c_void, u32, u32) -> *mut c_void;
+type FnSetCornerRadius = unsafe extern "C" fn(*mut c_void, *const *mut c_void, f32);
 type FnSetDims = unsafe extern "C" fn(*mut c_void, u32, u32) -> i32;
 type FnSetFormat = unsafe extern "C" fn(*mut c_void, i32) -> i32;
 type FnConnect = unsafe extern "C" fn(*mut c_void, i32) -> i32;
@@ -139,6 +140,8 @@ const SYM_TX_REPARENT: &[u8] = b"_ZN7android21SurfaceComposerClient11Transaction
 const SYM_TX_SET_FLAGS: &[u8] =
     b"_ZN7android21SurfaceComposerClient11Transaction8setFlagsERKNS_2spINS_14SurfaceControlEEEjj\0";
 const SYM_TX_APPLY: &[u8] = b"_ZN7android21SurfaceComposerClient11Transaction5applyEbb\0";
+const SYM_TX_SET_CORNER_RADIUS: &[u8] =
+    b"_ZN7android21SurfaceComposerClient11Transaction15setCornerRadiusERKNS_2spINS_14SurfaceControlEEEf\0";
 const SYM_SET_DIMS: &[u8] = b"_ZN7android7Surface20setBuffersDimensionsEjj\0";
 const SYM_SET_FORMAT: &[u8] = b"_ZN7android7Surface16setBuffersFormatEi\0";
 const SYM_CONNECT: &[u8] = b"_ZN7android7Surface7connectEi\0";
@@ -160,6 +163,7 @@ struct Api {
     tx_set_position: FnSetPosition,
     tx_reparent: Option<FnReparent>,
     tx_set_flags: Option<FnSetFlags>,
+    tx_set_corner: Option<FnSetCornerRadius>,
     tx_apply: FnApply,
     set_dims: FnSetDims,
     set_format: FnSetFormat,
@@ -241,6 +245,16 @@ fn load_api() -> Option<Api> {
             tx_set_position: std::mem::transmute(resolve(gui, SYM_TX_SET_POSITION)?),
             tx_reparent: resolve(gui, SYM_TX_REPARENT).map(|s| std::mem::transmute(s)),
             tx_set_flags: resolve(gui, SYM_TX_SET_FLAGS).map(|s| std::mem::transmute(s)),
+            // Optional, and checked with dlsym directly: a ROM without it is not
+            // an error, the alpha mask in the blitter covers that case.
+            tx_set_corner: {
+                let sym = symbol(gui, SYM_TX_SET_CORNER_RADIUS);
+                if sym.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute(sym))
+                }
+            },
             tx_apply: std::mem::transmute(resolve(gui, SYM_TX_APPLY)?),
             set_dims: std::mem::transmute(resolve(gui, SYM_SET_DIMS)?),
             set_format: std::mem::transmute(resolve(gui, SYM_SET_FORMAT)?),
@@ -334,11 +348,23 @@ impl PreviewLayer {
             return None;
         }
 
+        // A real circular clip is better than an alpha mask: SurfaceFlinger cuts
+        // the layer itself, so the corners are see-through even on a ROM that
+        // treats a CPU producer's buffer as opaque. The alpha mask in the blitter
+        // stays as the fallback for a libgui without setCornerRadius.
+        let clip = round && api.tx_set_corner.is_some();
+        let radius = width.min(height) as f32 * 0.5;
+
         let tx = Blob::new();
         unsafe {
             (api.tx_ctor)(tx.as_ptr());
             (api.tx_set_layer)(tx.as_ptr(), &control as *const *mut c_void, z);
             (api.tx_set_position)(tx.as_ptr(), &control as *const *mut c_void, x, y);
+            if clip {
+                if let Some(set_corner) = api.tx_set_corner {
+                    set_corner(tx.as_ptr(), &control as *const *mut c_void, radius);
+                }
+            }
             (api.tx_apply)(tx.as_ptr(), true, false);
         }
 
@@ -349,8 +375,8 @@ impl PreviewLayer {
             let format = (api.set_format)(surface, PIXEL_FORMAT_RGBA_8888);
             let connected = (api.connect)(surface, NATIVE_WINDOW_API_CPU);
             logging::info(&format!(
-                "preview: layer ready {}x{} at ({}, {}) z={} round={} dims={} format={} connect={}",
-                width, height, x, y, z, round, dims, format, connected
+                "preview: layer ready {}x{} at ({}, {}) z={} round={} clip={} radius={} dims={} format={} connect={}",
+                width, height, x, y, z, round, clip, radius, dims, format, connected
             ));
             if connected != 0 {
                 logging::error("preview: layer producer refused the CPU api");
@@ -364,7 +390,9 @@ impl PreviewLayer {
             surface,
             width,
             height,
-            round,
+            // The clip already removed the corners; masking them again would only
+            // soften the rim twice.
+            round: round && !clip,
             frames: 0,
             last_post: None,
         })
