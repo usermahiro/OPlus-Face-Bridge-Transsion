@@ -14,6 +14,13 @@
 # post-fs-data, not late_start: the HAL starts in late_start and would race this
 # action otherwise.
 on post-fs-data
+    # The parent is created by the platform's own post-fs-data action. If a ROM
+    # creates it later than this file is parsed, the mkdir below fails with
+    # ENOENT and nothing is copied, which shows up as "preview missing" with a
+    # perfectly working HAL. Creating the parents first costs two lines and
+    # removes the ordering assumption.
+    mkdir /data/local 0771 root root
+    mkdir /data/local/tmp 0771 shell shell
     mkdir /data/local/tmp/facehal 0775 system system
     copy /vendor/bin/hw/@HAL_NAME@ /data/local/tmp/facehal/@HAL_NAME@
     chmod 0755 /data/local/tmp/facehal/@HAL_NAME@
