@@ -304,6 +304,33 @@ fn main() {
     let const_gb_lock = b"_ZN7android13GraphicBuffer4lockEjPPvPiS3_\0";
     let const_gb_unlock = b"_ZN7android13GraphicBuffer6unlockEv\0";
     let const_queue = b"_ZN7android7Surface11queueBufferERKNS_2spINS_13GraphicBufferEEERKNS1_INS_5FenceEEEPNS_24SurfaceQueueBufferOutputE\0";
+    let const_dims = b"_ZN7android7Surface20setBuffersDimensionsEjj\0";
+    let const_format = b"_ZN7android7Surface16setBuffersFormatEi\0";
+    let const_connect = b"_ZN7android7Surface7connectEi\0";
+
+    // A Surface handed out by SurfaceControl has a producer but is not connected
+    // to its BufferQueue, and dequeueBuffer answers NO_INIT until it is. Geometry
+    // is set first so the queued buffers match the layer's size and format.
+    type FnSetDims = unsafe extern "C" fn(*mut c_void, u32, u32) -> i32;
+    type FnSetFormat = unsafe extern "C" fn(*mut c_void, i32) -> i32;
+    type FnConnect = unsafe extern "C" fn(*mut c_void, i32) -> i32;
+
+    if let Some(dims) = resolve(gui, const_dims) {
+        let dims: FnSetDims = unsafe { std::mem::transmute(dims) };
+        let ret = unsafe { dims(surface, WIDTH as u32, HEIGHT as u32) };
+        logging::info(&format!("layer-probe: setBuffersDimensions ret={}", ret));
+    }
+    if let Some(format) = resolve(gui, const_format) {
+        let format: FnSetFormat = unsafe { std::mem::transmute(format) };
+        let ret = unsafe { format(surface, PIXEL_FORMAT_RGBA_8888) };
+        logging::info(&format!("layer-probe: setBuffersFormat ret={}", ret));
+    }
+    if let Some(connect) = resolve(gui, const_connect) {
+        let connect: FnConnect = unsafe { std::mem::transmute(connect) };
+        // NATIVE_WINDOW_API_CPU: this is a CPU producer, it never sees an EGL context.
+        let ret = unsafe { connect(surface, 2) };
+        logging::info(&format!("layer-probe: connect(CPU) ret={}", ret));
+    }
 
     let (Some(dequeue), Some(gb_lock), Some(gb_unlock), Some(queue)) = (
         resolve(gui, const_dequeue),
