@@ -115,6 +115,11 @@ type FnReparent = unsafe extern "C" fn(
 type FnApply = unsafe extern "C" fn(*mut c_void, bool, bool) -> i32;
 type FnSetFlags = unsafe extern "C" fn(*mut c_void, *const *mut c_void, u32, u32) -> *mut c_void;
 type FnSetCornerRadius = unsafe extern "C" fn(*mut c_void, *const *mut c_void, f32);
+type FnSetCornerRadiusExt =
+    unsafe extern "C" fn(*mut c_void, *const *mut c_void, f32, f32, i32);
+/// `layer_state_t::eLayerOpaque`. Clearing it is what makes SurfaceFlinger blend
+/// a buffer instead of pasting it, which the alpha mask depends on.
+const LAYER_OPAQUE: u32 = 0x2;
 type FnSetDims = unsafe extern "C" fn(*mut c_void, u32, u32) -> i32;
 type FnSetFormat = unsafe extern "C" fn(*mut c_void, i32) -> i32;
 type FnConnect = unsafe extern "C" fn(*mut c_void, i32) -> i32;
@@ -142,6 +147,11 @@ const SYM_TX_SET_FLAGS: &[u8] =
 const SYM_TX_APPLY: &[u8] = b"_ZN7android21SurfaceComposerClient11Transaction5applyEbb\0";
 const SYM_TX_SET_CORNER_RADIUS: &[u8] =
     b"_ZN7android21SurfaceComposerClient11Transaction15setCornerRadiusERKNS_2spINS_14SurfaceControlEEEf\0";
+// OnePlus extension present in this ROM's libgui: radiusX, radiusY and an int
+// the stock AOSP version does not have. Its meaning is not documented anywhere
+// reachable from here, so it is a runtime knob.
+const SYM_TX_SET_CORNER_RADIUS_EXT: &[u8] =
+    b"_ZN7android21SurfaceComposerClient11Transaction18setCornerRadiusExtERKNS_2spINS_14SurfaceControlEEEffi\0";
 const SYM_SET_DIMS: &[u8] = b"_ZN7android7Surface20setBuffersDimensionsEjj\0";
 const SYM_SET_FORMAT: &[u8] = b"_ZN7android7Surface16setBuffersFormatEi\0";
 const SYM_CONNECT: &[u8] = b"_ZN7android7Surface7connectEi\0";
@@ -164,6 +174,7 @@ struct Api {
     tx_reparent: Option<FnReparent>,
     tx_set_flags: Option<FnSetFlags>,
     tx_set_corner: Option<FnSetCornerRadius>,
+    tx_set_corner_ext: Option<FnSetCornerRadiusExt>,
     tx_apply: FnApply,
     set_dims: FnSetDims,
     set_format: FnSetFormat,
@@ -255,6 +266,14 @@ fn load_api() -> Option<Api> {
                     Some(std::mem::transmute(sym))
                 }
             },
+            tx_set_corner_ext: {
+                let sym = symbol(gui, SYM_TX_SET_CORNER_RADIUS_EXT);
+                if sym.is_null() {
+                    None
+                } else {
+                    Some(std::mem::transmute(sym))
+                }
+            },
             tx_apply: std::mem::transmute(resolve(gui, SYM_TX_APPLY)?),
             set_dims: std::mem::transmute(resolve(gui, SYM_SET_DIMS)?),
             set_format: std::mem::transmute(resolve(gui, SYM_SET_FORMAT)?),
@@ -298,6 +317,8 @@ impl PreviewLayer {
         y: f32,
         z: i32,
         round: bool,
+        clip: i32,
+        corner_type: i32,
     ) -> Option<PreviewLayer> {
         let api = api()?;
         let client = unsafe { (api.get_default)() }.ptr();
@@ -348,22 +369,50 @@ impl PreviewLayer {
             return None;
         }
 
-        // A real circular clip is better than an alpha mask: SurfaceFlinger cuts
-        // the layer itself, so the corners are see-through even on a ROM that
-        // treats a CPU producer's buffer as opaque. The alpha mask in the blitter
-        // stays as the fallback for a libgui without setCornerRadius.
-        let clip = round && api.tx_set_corner.is_some();
+        // Three ways to get a circle, because the first two are not trusted on
+        // this ROM: clip 0 masks the corners in the buffer and clears the opaque
+        // flag so SurfaceFlinger blends them, clip 1 asks for the AOSP corner
+        // radius, clip 2 asks for OnePlus' extension which takes two radii and an
+        // extra int.
+        let mode = if round { clip } else { -1 };
         let radius = width.min(height) as f32 * 0.5;
+        let clipped = match mode {
+            1 => api.tx_set_corner.is_some(),
+            2 => api.tx_set_corner_ext.is_some(),
+            _ => false,
+        };
 
         let tx = Blob::new();
         unsafe {
             (api.tx_ctor)(tx.as_ptr());
             (api.tx_set_layer)(tx.as_ptr(), &control as *const *mut c_void, z);
             (api.tx_set_position)(tx.as_ptr(), &control as *const *mut c_void, x, y);
-            if clip {
-                if let Some(set_corner) = api.tx_set_corner {
-                    set_corner(tx.as_ptr(), &control as *const *mut c_void, radius);
+            match mode {
+                1 => {
+                    if let Some(set_corner) = api.tx_set_corner {
+                        set_corner(tx.as_ptr(), &control as *const *mut c_void, radius);
+                    }
                 }
+                2 => {
+                    if let Some(set_corner) = api.tx_set_corner_ext {
+                        set_corner(
+                            tx.as_ptr(),
+                            &control as *const *mut c_void,
+                            radius,
+                            radius,
+                            corner_type,
+                        );
+                    }
+                }
+                0 => {
+                    // Masking only works if SurfaceFlinger treats the buffer as
+                    // translucent, so clear the opaque flag explicitly instead of
+                    // trusting the default.
+                    if let Some(set_flags) = api.tx_set_flags {
+                        set_flags(tx.as_ptr(), &control as *const *mut c_void, 0, LAYER_OPAQUE);
+                    }
+                }
+                _ => {}
             }
             (api.tx_apply)(tx.as_ptr(), true, false);
         }
@@ -375,8 +424,20 @@ impl PreviewLayer {
             let format = (api.set_format)(surface, PIXEL_FORMAT_RGBA_8888);
             let connected = (api.connect)(surface, NATIVE_WINDOW_API_CPU);
             logging::info(&format!(
-                "preview: layer ready {}x{} at ({}, {}) z={} round={} clip={} radius={} dims={} format={} connect={}",
-                width, height, x, y, z, round, clip, radius, dims, format, connected
+                "preview: layer ready {}x{} at ({}, {}) z={} round={} clip={} radius={} type={} clipped={} dims={} format={} connect={}",
+                width,
+                height,
+                x,
+                y,
+                z,
+                round,
+                mode,
+                radius,
+                corner_type,
+                clipped,
+                dims,
+                format,
+                connected
             ));
             if connected != 0 {
                 logging::error("preview: layer producer refused the CPU api");
@@ -392,7 +453,7 @@ impl PreviewLayer {
             height,
             // The clip already removed the corners; masking them again would only
             // soften the rim twice.
-            round: round && !clip,
+            round: round && !clipped,
             frames: 0,
             last_post: None,
         })
@@ -635,10 +696,12 @@ fn prop_f32(name: &[u8], default: f32) -> f32 {
 ///   setprop persist.sys.facehal.preview.y 880
 ///   setprop persist.sys.facehal.preview.z 1000000
 ///   setprop persist.sys.facehal.preview.round 1
+///   setprop persist.sys.facehal.preview.clip 0
 ///
-/// `round 1` paints an inscribed disc and leaves the corners transparent, so the
-/// box can be made as large as the enrolment circle without covering the UI
-/// around it.
+/// `round 1` asks for a circle. `clip` picks how: 0 masks the corners in the
+/// buffer (and clears the layer's opaque flag so they blend), 1 uses the AOSP
+/// corner radius, 2 uses OnePlus' setCornerRadiusExt with `corner_type` as its
+/// undocumented int. Whichever the ROM honours is the one to keep.
 pub fn open_current() -> bool {
     let mut slot = match CURRENT.lock() {
         Ok(slot) => slot,
@@ -654,8 +717,10 @@ pub fn open_current() -> bool {
     let y = prop_f32(b"persist.sys.facehal.preview.y\0", 360.0);
     let z = prop_i32(b"persist.sys.facehal.preview.z\0", 1_000_000);
     let round = prop_i32(b"persist.sys.facehal.preview.round\0", 0) != 0;
+    let clip = prop_i32(b"persist.sys.facehal.preview.clip\0", 0);
+    let corner_type = prop_i32(b"persist.sys.facehal.preview.corner_type\0", 15);
 
-    match PreviewLayer::create(width, height, x, y, z, round) {
+    match PreviewLayer::create(width, height, x, y, z, round, clip, corner_type) {
         Some(layer) => {
             *slot = Some(layer);
             true

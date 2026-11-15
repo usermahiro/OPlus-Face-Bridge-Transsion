@@ -250,17 +250,22 @@ setprop persist.sys.facehal.preview.x 220   # left edge
 setprop persist.sys.facehal.preview.y 880   # top edge
 setprop persist.sys.facehal.preview.z 1000000   # z order, higher is on top
 setprop persist.sys.facehal.preview.round 1 # 1 = circular, 0 = plain rectangle
+setprop persist.sys.facehal.preview.clip 0  # 0 = mask, 1 = corner radius, 2 = OnePlus ext
 ```
 
 The default z puts the layer above app windows. Lower it (for example `-1`) to sit behind the
 app so the preview only shows through the SurfaceView hole the app already has.
 
-`round 1` makes the layer circular. Two mechanisms, whichever the ROM supports: first
-`SurfaceControl::Transaction::setCornerRadius` at half the short side, which asks
-SurfaceFlinger to clip the layer itself, so the corners are see-through regardless of how the
-buffer is treated; if libgui does not export that, the blitter masks the disc and leaves the
-corners at alpha 0 instead. Without it the layer is a solid rectangle that covers the ring and
-the text under it.
+`round 1` makes the layer circular. Three mechanisms, picked with `persist.sys.facehal.preview.clip`:
+
+- `0` masks the disc in the buffer and clears the layer's opaque flag so the corners blend.
+- `1` calls the AOSP `SurfaceControl::Transaction::setCornerRadius` at half the short side.
+- `2` calls OnePlus' `setCornerRadiusExt(radius, radius, corner_type)`, whose last argument is
+  undocumented; `corner_type` defaults to 15 (all four corners).
+
+`1` was tried first here and changed nothing: this ROM's SurfaceFlinger ignores the stock corner
+radius on a buffer layer. Use whichever the log and the screen agree on. Without `round` the
+layer is a solid rectangle that covers the ring and the text under it.
 
 The same `dlsym` route as the probe is used, so a ROM with a different libgui logs the missing
 symbol instead of failing to start.
