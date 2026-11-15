@@ -71,8 +71,39 @@ struct ANativeWindow_Buffer {
 #[repr(C, align(16))]
 struct Blob([u8; 4096]);
 
+/// Result slot for a function that returns `sp<T>` by value.
+///
+/// `sp<T>` has a destructor, so the AArch64 C++ ABI returns it through a hidden
+/// pointer that the callee reads from x8. `SurfaceControl::getSurface` shows the
+/// convention plainly (`mov x20, x8` then `str x0, [x20]`). Declaring the call as
+/// returning a plain pointer makes Rust read a return value that was never put in
+/// x0, and the probe died with SIGSEGV in the first C++ call it made.
+///
+/// A Rust return type larger than two registers makes the compiler pass the same
+/// hidden pointer, so the first eight bytes here receive the sp's only member.
+#[repr(C)]
+struct SpOut {
+    slot: [u8; 32],
+}
+
+impl SpOut {
+    /// The object pointer the sp wrapped. The reference is intentionally leaked:
+    /// the probe exits within a minute and never releases a layer.
+    fn ptr(&self) -> *mut c_void {
+        let mut p: *mut c_void = ptr::null_mut();
+        unsafe {
+            ptr::copy_nonoverlapping(
+                self.slot.as_ptr(),
+                &mut p as *mut *mut c_void as *mut u8,
+                std::mem::size_of::<*mut c_void>(),
+            );
+        }
+        p
+    }
+}
+
 // Method table, all member functions so the surface control pointer is `this`.
-type FnGetDefault = unsafe extern "C" fn() -> *mut c_void;
+type FnGetDefault = unsafe extern "C" fn() -> SpOut;
 type FnCreateSurfaceChecked = unsafe extern "C" fn(
     *mut c_void,       // this (SurfaceComposerClient*)
     *const c_void,     // const String8& name
@@ -85,7 +116,7 @@ type FnCreateSurfaceChecked = unsafe extern "C" fn(
     *const c_void,     // const gui::LayerMetadata&
     *mut u32,          // outTransformHint
 ) -> i32;
-type FnGetSurface = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type FnGetSurface = unsafe extern "C" fn(*mut c_void) -> SpOut;
 type FnCtor0 = unsafe extern "C" fn(*mut c_void);
 type FnString8Ctor = unsafe extern "C" fn(*mut c_void, *const c_char);
 type FnTxSetLayer = unsafe extern "C" fn(*mut c_void, *const *mut c_void, i32) -> *mut c_void;
@@ -183,7 +214,8 @@ fn main() {
         return;
     };
 
-    let client = unsafe { get_default() };
+    logging::info("layer-probe: asking SurfaceFlinger for the default client");
+    let client = unsafe { get_default() }.ptr();
     if client.is_null() {
         logging::error("layer-probe: SurfaceComposerClient::getDefault() returned null");
         return;
@@ -266,7 +298,7 @@ fn main() {
         logging::error("layer-probe: no Transaction entry points, layer stays at z=0");
     }
 
-    let surface = unsafe { get_surface(control) };
+    let surface = unsafe { get_surface(control) }.ptr();
     if surface.is_null() {
         logging::error("layer-probe: SurfaceControl::getSurface() returned null");
         return;

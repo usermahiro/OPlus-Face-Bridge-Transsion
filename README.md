@@ -146,9 +146,10 @@ su -c "sh $(pwd)/script.sh unmount"  # drop the mount, back to the stock binary
 ```
 
 It refuses to run without root, unmounts a leftover mount on the same target first, copies
-the binary to `/data/local/tmp/facework`, sets `hal_face_default_exec` on it (without that
-label init's exec is denied by SELinux), bind-mounts it over the vendor path and then runs
-`stop`/`start` on the service.
+the binary onto a tmpfs (files on `/data` are on a `nosuid` mount, and SELinux then denies
+the `init` -> `hal_face_default` transition), sets `hal_face_default_exec` on it (without that
+label init's exec is denied), bind-mounts it over the vendor path and then runs `stop`/`start`
+on the service.
 
 Doing it by hand is still possible:
 

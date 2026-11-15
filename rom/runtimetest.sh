@@ -14,7 +14,11 @@ set -eu
 HAL_NAME="@HAL_NAME@"
 SERVICE_NAME="@SERVICE_NAME@"
 DST="/vendor/bin/hw/$HAL_NAME"
-WORK="${WORK:-/data/local/tmp/facework}"
+# Files on /data sit on a nosuid mount, and SELinux then refuses the transition
+# init -> hal_face_default (avc: denied nosuid_transition), so init falls back to
+# execute_no_trans and dies without logging anything. A tmpfs mounted without
+# nosuid does not have that problem.
+MNT="${MNT:-/data/local/tmp/facemnt}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC="$HERE/vendor/bin/hw/$HAL_NAME"
 MODE="${1:-mount}"
@@ -41,18 +45,29 @@ fi
 
 [ -f "$SRC" ] || { say "binary tidak ada: $SRC"; say "extract zip dulu, jalankan dari folder hasil extract"; exit 1; }
 
-mkdir -p "$WORK"
-cp -f "$SRC" "$WORK/$HAL_NAME"
-chmod 0755 "$WORK/$HAL_NAME"
+# The copy that init actually runs lives on tmpfs, not on /data.
+mkdir -p "$MNT"
+if ! grep -q " $MNT tmpfs " /proc/mounts; then
+    mount -t tmpfs -o rw,seclabel,mode=0755 tmpfs "$MNT" \
+        || { say "mount tmpfs gagal: $MNT"; exit 1; }
+fi
+cp -f "$SRC" "$MNT/$HAL_NAME"
+chmod 0755 "$MNT/$HAL_NAME"
 
 # init execs this inode through /vendor/bin/hw, so the label has to be the
 # vendor exec label. On /data it is shell_data_file and the exec would be denied.
-chcon u:object_r:hal_face_default_exec:s0 "$WORK/$HAL_NAME" 2>/dev/null \
+chcon u:object_r:hal_face_default_exec:s0 "$MNT/$HAL_NAME" 2>/dev/null \
     || say "peringatan: chcon gagal, exec bisa ditolak SELinux"
 
-mount --bind "$WORK/$HAL_NAME" "$DST" || { say "mount --bind gagal"; exit 1; }
+mount --bind "$MNT/$HAL_NAME" "$DST" || { say "mount --bind gagal"; exit 1; }
 grep -q " $DST " /proc/mounts || { say "mount tidak terlihat di /proc/mounts"; exit 1; }
-say "mount ok: $DST -> $WORK/$HAL_NAME"
+say "mount ok: $DST -> $MNT/$HAL_NAME"
+
+# The whole point of the tmpfs: no nosuid on the filesystem holding the inode.
+MOPTS=$(awk -v t="$DST" '$2==t {print $4}' /proc/mounts)
+case ",$MOPTS," in
+    *,nosuid,*) say "peringatan: mount masih nosuid ($MOPTS), init akan menolak transisi";;
+esac
 
 # The rc that defines the service comes from this same zip; without it there is
 # nothing for init to start.
