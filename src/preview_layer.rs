@@ -706,7 +706,7 @@ fn prop_f32(name: &[u8], default: f32) -> f32 {
 ///   setprop persist.sys.facehal.preview.z 1000000
 ///   setprop persist.sys.facehal.preview.round 1
 ///   setprop persist.sys.facehal.preview.clip 0
-///   setprop persist.sys.facehal.preview.delay_ms 3000
+///   setprop persist.sys.facehal.preview.delay_ms 2000
 ///
 /// `round 1` asks for a circle. `clip` picks how: 0 masks the corners in the
 /// buffer (and clears the layer's opaque flag so they blend), 1 uses the AOSP
@@ -732,7 +732,7 @@ pub fn open_current() -> bool {
     let round = prop_i32(b"persist.sys.facehal.preview.round\0", 1) != 0;
     let clip = prop_i32(b"persist.sys.facehal.preview.clip\0", 0);
     let corner_type = prop_i32(b"persist.sys.facehal.preview.corner_type\0", 15);
-    let delay_ms = prop_i32(b"persist.sys.facehal.preview.delay_ms\0", 3000).clamp(0, 10_000);
+    let delay_ms = prop_i32(b"persist.sys.facehal.preview.delay_ms\0", 2000).clamp(0, 10_000);
 
     match PreviewLayer::create(width, height, x, y, z, round, clip, corner_type) {
         Some(mut layer) => {

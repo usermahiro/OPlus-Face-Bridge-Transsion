@@ -251,7 +251,7 @@ setprop persist.sys.facehal.preview.y 404   # top edge
 setprop persist.sys.facehal.preview.z 1000000   # z order, higher is on top
 setprop persist.sys.facehal.preview.round 1 # 1 = circular, 0 = plain rectangle
 setprop persist.sys.facehal.preview.clip 0  # 0 = mask, 1 = corner radius, 2 = OnePlus ext
-setprop persist.sys.facehal.preview.delay_ms 3000   # hold the first frame back
+setprop persist.sys.facehal.preview.delay_ms 2000   # hold the first frame back
 ```
 
 These are also the defaults in the code, tuned on a 1080x2400 panel.
